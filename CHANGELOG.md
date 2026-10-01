@@ -3,6 +3,22 @@
 本项目的显著变更记录。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.6.0] - 2026-10-02
+
+### Fixed（三路 Agent 审计：UX / 前后端贯通 / 代码质量）
+- **回归防线补漏**：mgmt.summary 在 v1.5.1 导出补丁中被错位成嵌套死函数
+  （mgmt/chain 盘点静默全灭）、vops 的 disks/snapshots 分支断裂静默空转
+  —— 均已修复并补上可抓住此类回归的测试。
+- **前后端贯通**：⑧ 打通 → ⑨ 预填后旧连接缓存失效；绕过成功后 Base DN
+  无条件刷新（修复换目标后打到旧域）；chain 部分成功也登记清理中心；
+  上传动作登记；SSO 域名自动填充 ③ Base DN；各页目标栏与全局目标实时同步。
+- **UX**：Esc/取消统一反馈；任务防重入；⑤ 页新增"已收集凭据"面板（可复制）；
+  ④ 新会话自动接管 + 监听反馈 + LHost 自动探测 + 端口同步；③ 端口 636
+  自动联动 TLS + 新增删除账户（兑现清理中心承诺）；① 工具栏精简 + 回车添加 +
+  扫描可取消带进度；日志横向滚动；argv 密码掩码（v1.4.0 起）。
+- **死代码清理**：gd summary/reconnect 助手、probe_many、AES 别名、
+  重复 user_attrs 生成三处合一（berldap.user_attrs）。
+
 ## [1.5.1] - 2026-10-02
 
 ### Added
