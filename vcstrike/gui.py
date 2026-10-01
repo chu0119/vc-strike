@@ -176,6 +176,10 @@ class ToolApp:
         st.map("Treeview",
                background=[("selected", C["accent"])],
                foreground=[("selected", "#ffffff")])
+        try:
+            st.configure("Sash", sashthickness=8)
+        except Exception:
+            pass
         self.root.option_add("*TCombobox*Listbox.font", base)
         self.root.option_add("*TCombobox*Listbox.background", C["bg"])
         self.root.option_add("*TCombobox*Listbox.foreground", C["fg"])
@@ -292,6 +296,38 @@ class ToolApp:
         self.log("[+] 日志已保存: %s" % f, "+")
 
     # ---------------- 公共 ----------------
+    def _tree_resizable(self, tree):
+        """让 Treeview 列宽可拖拽：悬停表头分隔线（光标变双箭头）按下
+        左右拖动即可调整该列宽度；tkinter 原生不支持，此处补齐。"""
+        state = {"col": None, "x": 0, "w": 0}
+
+        def _press(e):
+            try:
+                if tree.identify_region(e.x, e.y) == "separator":
+                    state["col"] = tree.identify_column(e.x)
+                    state["x"] = e.x
+                    state["w"] = tree.column(state["col"], "width")
+                else:
+                    state["col"] = None
+            except Exception:
+                state["col"] = None
+
+        def _motion(e):
+            try:
+                over = tree.identify_region(e.x, e.y) == "separator"
+            except Exception:
+                over = False
+            tree.configure(cursor="sb_h_double_arrow" if over else "")
+
+        def _drag(e):
+            if state["col"]:
+                tree.column(state["col"],
+                            width=max(30, state["w"] + (e.x - state["x"])))
+
+        tree.bind("<ButtonPress-1>", _press)
+        tree.bind("<B1-Motion>", _drag)
+        tree.bind("<Motion>", _motion)
+
     def _target_bar(self, parent, row=0):
         f = ttk.Frame(parent)
         f.grid(row=row, column=0, columnspan=12, sticky="ew", pady=(0, 4))
@@ -407,7 +443,7 @@ class ToolApp:
         ttk.Button(top, text="批量指纹 [F5]", style="Acc.TButton",
                    command=self._scan_all).pack(side="left", padx=6)
         ttk.Button(top, text="导出 CSV", command=self._scan_export).pack(side="left")
-        ttk.Label(top, text="代理:", style="Muted.TLabel").pack(side="right", padx=(8, 2))
+        ttk.Label(top, text="代理(http://…,可选):", style="Muted.TLabel").pack(side="right", padx=(8, 2))
         ttk.Entry(top, textvariable=self.http_proxy, width=14).pack(side="right")
 
         cols = ("host", "443", "5480", "514", "1514", "389", "636", "2020",
@@ -429,6 +465,7 @@ class ToolApp:
         sy.pack(side="left", fill="y")
         sx.pack(side="bottom", fill="x")
         self.scan_tree.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
+        self._tree_resizable(self.scan_tree)
         self.scan_tree.bind("<Double-1>", lambda e: self._tgt_setcur())
         self.scan_results = {}
 
@@ -935,6 +972,7 @@ class ToolApp:
         sy.pack(side="left", fill="y")
         sx.pack(side="bottom", fill="x")
         self.v590_tree.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
+        self._tree_resizable(self.v590_tree)
 
         af = ttk.LabelFrame(right, text="账户操作（授权测试）")
         af.pack(fill="x", pady=4)
@@ -1349,6 +1387,7 @@ class ToolApp:
         self.sess_tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="left", fill="y")
         self.sess_tree.configure(yscrollcommand=sb.set)
+        self._tree_resizable(self.sess_tree)
         self.sess_tree.bind("<Double-1>", lambda e: self._c2_use())
 
         rf = ttk.LabelFrame(right, text="交互终端（选中会话后直通）")
@@ -1577,6 +1616,8 @@ class ToolApp:
             self.cred_tree.heading(c, text=t)
             self.cred_tree.column(c, width=w, anchor="w")
         self.cred_tree.pack(fill="x", padx=4, pady=(0, 4))
+        self._tree_resizable(self.cred_tree)
+        ttk.Label(of, text="命令输出:", style="Muted.TLabel").pack(anchor="w", padx=6)
         self.postex_out = tk.Text(of, height=6, bg=COLORS["logbg"], fg=COLORS["fg"],
                                   relief="flat", font=(self.font_family, 9))
         self.postex_out.pack(fill="both", expand=True, padx=4, pady=4)
@@ -1845,6 +1886,7 @@ class ToolApp:
         sy.pack(side="left", fill="y")
         sx.pack(side="bottom", fill="x")
         self.vv_tree.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
+        self._tree_resizable(self.vv_tree)
 
         rf = ttk.LabelFrame(right, text="只读检查")
         rf.pack(fill="x", pady=4)
@@ -1885,7 +1927,8 @@ class ToolApp:
         ebar = ttk.Frame(ef)
         ebar.pack(fill="x", padx=4, pady=2)
         ttk.Label(ebar, text="导出到:").pack(side="left")
-        self.vv_dest = tk.StringVar(value=os.getcwd())
+        self.vv_dest = tk.StringVar(value=os.path.join(
+            os.path.expanduser("~"), "Documents"))
         ttk.Entry(ebar, textvariable=self.vv_dest, width=20).pack(
             side="left", fill="x", expand=True, padx=2)
         ttk.Button(ebar, text="浏览", width=6,
@@ -2181,12 +2224,16 @@ class ToolApp:
                                      show="headings", height=6)
         _as = ttk.Scrollbar(awf, orient="vertical", command=self.act_tree.yview)
         self.act_tree.configure(yscrollcommand=_as.set)
+        self._tree_resizable(self.act_tree)
         for c, t, w in (("time", "时间", 100), ("type", "动作", 130),
                         ("target", "目标", 120), ("detail", "详情", 560)):
             self.act_tree.heading(c, text=t)
             self.act_tree.column(c, width=w, anchor="w")
+        _ax = ttk.Scrollbar(awf, orient="horizontal", command=self.act_tree.xview)
         self.act_tree.pack(side="left", fill="x", padx=4, pady=4)
         _as.pack(side="right", fill="y")
+        _ax.pack(side="bottom", fill="x")
+        self.act_tree.configure(xscrollcommand=_ax.set)
 
         self.clean_txt = tk.Text(f, bg=COLORS["logbg"], fg=COLORS["fg"],
                                  relief="flat", highlightthickness=1,
