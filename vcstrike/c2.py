@@ -157,6 +157,9 @@ class SessionManager:
 
     # ---- 监听器 ----
     def add_listener(self, port):
+        if any(p == port for p, _ in self.listeners):
+            self._log("[i] 端口 %d 已在监听（忽略重复请求）" % port)
+            return port
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind(("0.0.0.0", port))

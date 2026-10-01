@@ -17,7 +17,7 @@ POSTEX_MACHINE_CREDS = (
 POSTEX_SSO_DOMAIN = (
     "/opt/likewise/bin/lwregshell list_values "
     "'[HKEY_THIS_MACHINE\\services\\vmdir]' 2>/dev/null | grep dcAccountDN | "
-    "grep -oE 'dc=.*' | sed 's/^dc=//;s/,dc=/./g'"
+    "grep -oE 'dc=.*' | sed 's/^dc=//;s/,dc=/./g;s/\"//g'"
 )
 
 # 环境侦察：网络、服务、日志转发、计划任务、SSO 状态

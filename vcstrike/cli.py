@@ -30,7 +30,7 @@ from .syslog59310 import (build_rfc5424, check_write, write_file, plant_cron,
                           traversal_host, plant_revshell)
 from .srp59309 import srp_bypass_bind
 from .berldap import (connect_ldap, root_dse_probe, op_search, op_add,
-                      op_modify, collect_search, parse_ldap_result)
+                      op_modify, collect_search, parse_ldap_result, has_srp)
 from .postex import POSTEX_ACTIONS
 
 
@@ -283,7 +283,7 @@ def cmd_check59309(a):
         return 1
     print("[+] SASL 机制: %s" % (",".join(dse["mechs"]) or "(无)"))
     print("[+] namingContexts: %s" % (";".join(dse["namingContexts"]) or "(无)"))
-    if "SRP" not in dse["mechs"]:
+    if not has_srp(dse["mechs"]):
         print("[-] 未通告 SRP（可能已修复/禁用/需认证）")
         return 1
     if not a.bypass:

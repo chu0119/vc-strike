@@ -3,6 +3,21 @@
 本项目的显著变更记录。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.1.2] - 2026-10-01
+
+### Fixed
+- **反弹 shell 雪崩**：植入的 cron 为每分钟触发且不删除自身，多次植入/
+  历史残留叠加后每分钟连入数条会话。所有植入（RCE/反弹/WebShell）改为
+  **一次性自毁 cron**（执行前先删除自身文件与 rsyslog 自动创建的目录）。
+- **监听器重复绑定**：Windows 下 SO_REUSEADDR 允许同端口重复 bind，
+  重复点击"植入+监听"会堆出多个监听器 —— add_listener 幂等化。
+- **SRP 机制误判**：vmdird 的 rootDSE 可能把机制作为单个含空格的值
+  （"GSSAPI SRP"）返回，按列表元素判断漏判 —— 统一 has_srp() 子串判断。
+- **SRP 挑战解析越界**：vmdird 返回的挑战（实测 821B）与 srp.c 固定布局
+  存在差异（前导 0x00 字节有无），固定解析崩溃 —— 改为偏移探测式解析
+  （带 N/g/salt/B 合理性约束），失败时给出 hexdump 诊断而非裸 traceback。
+- **SSO 域名尾引号**：lwregshell 值带引号，输出 "vsphere.local"" —— sed 补去引号。
+
 ## [1.1.1] - 2026-10-01
 
 ### Fixed

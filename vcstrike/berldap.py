@@ -256,6 +256,15 @@ def collect_search(conn):
         # 其余（searchResRef 等）忽略
 
 
+def has_srp(mechs):
+    """判断 SASL 机制列表是否含 SRP。
+
+    vmdird 的 rootDSE 可能把机制作为单个含空格的值返回（如 "GSSAPI SRP"），
+    按列表元素 `in` 判断会漏判 —— 统一用子串判断。
+    """
+    return any("SRP" in str(m).upper() for m in (mechs or []))
+
+
 def root_dse_probe(host, port, use_tls=False, timeout=8):
     """匿名读取 rootDSE：supportedSASLMechanisms / namingContexts。"""
     conn = connect_ldap(host, port, use_tls, timeout)

