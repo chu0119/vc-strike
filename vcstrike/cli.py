@@ -397,7 +397,7 @@ def cmd_postex(a):
 
 def run_selftest():
     from .selftest import run
-    return run()
+    return 0 if run() else 1
 
 
 def cmd_gui(_a):
