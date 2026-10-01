@@ -123,7 +123,7 @@ class ToolApp:
                 break
         C = COLORS
         # 字体已整体锁定（见 __init__ 字体锁定段）：全部 UI 单一字族，
-        # 粗细一致；等宽 Consolas 仅用于终端/日志/数据区。
+        # 粗细一致；Consolas 仅保留在 C2 交互终端（shell 需要等宽对齐）。
         base = (self.font_family, 9)
         st.configure(".", background=C["bg"], foreground=C["fg"], font=base)
         st.configure("TNotebook", background=C["bg"], borderwidth=0,
@@ -210,7 +210,7 @@ class ToolApp:
                                highlightthickness=1,
                                highlightbackground=C["border"],
                                highlightcolor=C["border"],
-                               font=("Consolas", 9), state="disabled", wrap="none")
+                               font=(self.font_family, 9), state="disabled", wrap="none")
         self.log_txt.pack(fill="both", expand=True)
         for k, c in (("i", C["fg"]), ("m", C["muted"]), ("+", C["ok"]),
                      ("w", C["warn"]), ("!", C["err"]), ("d", "#5a9d5f")):
@@ -522,7 +522,7 @@ class ToolApp:
             row=4, column=0, columnspan=2, sticky="w", padx=4)
         self.v510_wtext = tk.Text(wf, height=4, bg=COLORS["logbg"], fg=COLORS["fg"],
                                   insertbackground=COLORS["fg"], relief="flat",
-                                  font=("Consolas", 9))
+                                  font=(self.font_family, 9))
         self.v510_wtext.grid(row=5, column=0, columnspan=2, sticky="ew", padx=4, pady=2)
         self.v510_wtext.insert("1.0", "pwned-by-authorized-test")
         ttk.Button(wf, text="预览报文", command=self._b310_preview).grid(
@@ -547,7 +547,7 @@ class ToolApp:
                                 relief="flat", highlightthickness=1,
                                 highlightbackground=COLORS["border"],
                                 highlightcolor=COLORS["border"],
-                                font=("Consolas", 9))
+                                font=(self.font_family, 9))
         self.v510_out.pack(fill="both", expand=True, pady=4)
         self.v510_out.insert("1.0", "（RCE 输出将显示在此处 —— 执行「执行并取回输出」后回显）")
 
@@ -820,7 +820,7 @@ class ToolApp:
         ttk.Button(bf, text="一键评估（探测 → 绕过 → 枚举用户/管理员组）",
                    command=self._b309_quick_assess).pack(fill="x", padx=4, pady=2)
         self.v590_info = tk.Text(left, height=6, bg=COLORS["logbg"], fg=COLORS["fg"],
-                                 relief="flat", font=("Consolas", 9))
+                                 relief="flat", font=(self.font_family, 9))
         self.v590_info.pack(fill="x", pady=4)
 
         lf = ttk.LabelFrame(left, text="SSO 目录信息收集")
@@ -898,7 +898,7 @@ class ToolApp:
                    command=self._b309_console).grid(row=3, column=0, sticky="w",
                                                     padx=4, pady=4)
         self.v590_ctext = tk.Text(cf, height=8, bg=COLORS["logbg"], fg=COLORS["fg"],
-                                  relief="flat", font=("Consolas", 9))
+                                  relief="flat", font=(self.font_family, 9))
         self.v590_ctext.grid(row=4, column=0, columnspan=4, sticky="nsew", padx=4, pady=2)
         cf.columnconfigure(1, weight=1)
         cf.rowconfigure(4, weight=1)
@@ -1430,7 +1430,7 @@ class ToolApp:
         of = ttk.LabelFrame(f, text="输出 / 已收集凭据")
         of.grid(row=3, column=0, sticky="nsew", pady=4)
         self.postex_out = tk.Text(of, bg=COLORS["logbg"], fg=COLORS["fg"],
-                                  relief="flat", font=("Consolas", 9))
+                                  relief="flat", font=(self.font_family, 9))
         self.postex_out.pack(fill="both", expand=True, padx=4, pady=4)
         ttk.Label(of, text="机器账户可用于直连 LDAPS 做任意 LDAP 操作，或作为横向凭据。"
                            "（安全边界：不含 ESXi 破坏/勒索与隐蔽持久化功能）",
@@ -1510,7 +1510,7 @@ class ToolApp:
                                  relief="flat", highlightthickness=1,
                                  highlightbackground=COLORS["border"],
                                  highlightcolor=COLORS["border"],
-                                 font=("Consolas", 9))
+                                 font=(self.font_family, 9))
         self.clean_txt.grid(row=2, column=0, sticky="nsew", pady=4)
         self.clean_txt.insert("1.0", "（尚无清理方案）\n"
                                      "点击上方「生成清理方案」后，此处显示本次会话的清理步骤清单。\n"
@@ -1564,7 +1564,7 @@ class ToolApp:
         ttk.Label(top, text="防御侧自查 / 排查 / 缓解 —— 来自公开 POC 仓库与 QTR IR 案例",
                   style="Muted.TLabel").pack(side="left", padx=8)
         t = tk.Text(f, bg=COLORS["logbg"], fg=COLORS["fg"], relief="flat",
-                    font=("Consolas", 9))
+                    font=(self.font_family, 9))
         t.grid(row=1, column=0, sticky="nsew", pady=4)
         from .data import ABOUT_TEXT, REFERENCES
         refs = "\n".join("- %s: %s" % (n, u) for n, u in REFERENCES)

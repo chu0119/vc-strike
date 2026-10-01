@@ -126,6 +126,38 @@ vCenter 出厂自签证书。它们不是本工具自身的安全选择，替换
 不兼容、利用必然失败（详见源码 `[协议保真]` 注释块与
 [docs/漏洞分析.md](docs/漏洞分析.md)）。
 
+## 🗂 工作约定（维护守则）
+
+- **本地仓库：`D:\xiangmu\vc-strike`** —— 本项目的全部开发、测试、构建、打包
+  操作一律在项目目录内进行，构建产物（build/dist/spec）也留在目录内，
+  不外散、不提交进 git。
+- 预编译 exe 挂 **GitHub Releases**，仓库内只进源码与文档。
+- UI / 交互改动请走 `tools_ui_shots.py` 截图 + Agent 审查循环，全部页签
+  PASS 后再合入（流程见 CONTRIBUTING.md）。
+
+## 📦 打包与下载
+
+**预编译版本**：[Releases](https://github.com/chu0119/vc-strike/releases) 下载
+
+| 产物 | 说明 |
+|---|---|
+| `VC-Strike.exe` | 单文件，CLI + GUI 双形态（带控制台）|
+| `VC-Strike-GUI.exe` | 单文件纯 GUI（无控制台窗口）|
+| `checksums.txt` | SHA256 校验值 |
+
+> PyInstaller 打包的 exe 可能被杀毒软件误报（通用壳特征），请以 checksums.txt
+> 校验为准，或直接 `python vc-strike.py` 源码运行（零依赖，无供应链风险）。
+
+**本地打包**（在项目目录 `D:\xiangmu\vc-strike` 内执行）：
+
+```bash
+pip install pyinstaller
+python -m PyInstaller --noconfirm --clean --onefile --name VC-Strike vc-strike.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name VC-Strike-GUI vc-strike-gui.py
+# 产物在 dist/ 下；校验值：
+python -c "import hashlib,glob;[print(hashlib.sha256(open(f,'rb').read()).hexdigest(), f) for f in glob.glob('dist/*')]"
+```
+
 ## 📖 文档
 
 - [使用手册（GUI/CLI/C2 全参数）](docs/使用手册.md)

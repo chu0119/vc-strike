@@ -6,6 +6,7 @@ __pycache__/
 venv/
 build/
 dist/
+*.spec
 
 # 工具运行产物
 *.log
