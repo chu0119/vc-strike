@@ -28,3 +28,13 @@ def be32(n):
 # 不是本工具自身的加密选择；替换为 SHA-256 会导致利用必然失败。
 # ---------------------------------------------------------------------------
 SHA1_EMPTY = hashlib.sha1(b"").digest()   # da39a3ee5e6b4b0d3255bfef95601890afd80709
+
+
+def gen_user():
+    """自动生成测试账户名。"""
+    return "pentest_" + rand_name(4)
+
+
+def gen_password():
+    """自动生成满足 SSO 复杂度的强密码。"""
+    return rand_name(10) + "!Aa1" + rand_name(2)

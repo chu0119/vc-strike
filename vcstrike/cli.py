@@ -459,9 +459,15 @@ def cmd_vops(a):
             if a.action == "detail":
                 for k, v in c.vm_detail(a.vm).items():
                     print("%s: %s" % (k, v))
-        elif a.action == "disks":
-            for r in c.vm_disks(a.vm):
-                print(" | ".join(r))
+            elif a.action == "disks":
+                for r in c.vm_disks(a.vm):
+                    print(" | ".join(r))
+            else:
+                snaps = c.vm_snapshots(a.vm)
+                if not snaps:
+                    print("快照：无")
+                for sn in snaps:
+                    print(" | ".join(sn))
         elif a.action == "export":
             if not a.vm or not a.out:
                 print("[-] export 需要 --vm 与 --out（目标目录）")

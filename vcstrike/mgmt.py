@@ -205,6 +205,32 @@ class VCenterRest:
         return False, "HTTP %d: %s" % (st,
                                        body[:150].decode("utf-8", "replace"))
 
+    # ---- 汇总 ----
+    def summary(self, max_rows=12):
+        def table(title, headers, rows):
+            out = ["  %s（%d）: %s" % (title, len(rows),
+                                       " | ".join(headers))]
+            for r in rows[:max_rows]:
+                out.append("    · " + " | ".join(r))
+            if len(rows) > max_rows:
+                out.append("    · …（其余 %d 条略，完整清单见报告）"
+                           % (len(rows) - max_rows))
+            return out
+
+        lines = ["═ vSphere 资产盘点（只读）═"]
+        for title, headers, fn in (
+                ("虚拟机", ("名称", "电源", "vCPU", "内存MiB"), self.vms),
+                ("主机", ("名称", "连接状态"), self.hosts),
+                ("数据存储", ("名称", "类型", "状态", "容量", "剩余"),
+                 self.datastores),
+                ("集群", ("名称",), self.clusters),
+                ("网络", ("名称", "类型"), self.networks)):
+            try:
+                lines += table(title, headers, fn())
+            except MgmtError as e:
+                lines.append("  %s: 采集失败（%s）" % (title, e))
+        return "\n".join(lines)
+
     # ---- VM 导出（OVF/OVA，封装 VMware 官方 ovftool；仅单台，全程审计）----
     def export_vm_ovftool(self, vm_name, dest_dir, ovftool=None,
                           log=None, stop_flag=None):
@@ -287,33 +313,6 @@ def ovftool_source_url(host, user, password, datacenter, vm_name):
         urllib.parse.quote(password, safe=""),
         host, urllib.parse.quote(datacenter, safe=""),
         urllib.parse.quote(vm_name, safe=""))
-
-
-    # ---- 汇总 ----
-    def summary(self, max_rows=12):
-        def table(title, headers, rows):
-            out = ["  %s（%d）: %s" % (title, len(rows),
-                                       " | ".join(headers))]
-            for r in rows[:max_rows]:
-                out.append("    · " + " | ".join(r))
-            if len(rows) > max_rows:
-                out.append("    · …（其余 %d 条略，完整清单见报告）"
-                           % (len(rows) - max_rows))
-            return out
-
-        lines = ["═ vSphere 资产盘点（只读）═"]
-        for title, headers, fn in (
-                ("虚拟机", ("名称", "电源", "vCPU", "内存MiB"), self.vms),
-                ("主机", ("名称", "连接状态"), self.hosts),
-                ("数据存储", ("名称", "类型", "状态", "容量", "剩余"),
-                 self.datastores),
-                ("集群", ("名称",), self.clusters),
-                ("网络", ("名称", "类型"), self.networks)):
-            try:
-                lines += table(title, headers, fn())
-            except MgmtError as e:
-                lines.append("  %s: 采集失败（%s）" % (title, e))
-        return "\n".join(lines)
 
 
 def gather_inventory(host, user, password, port=443, timeout=15):

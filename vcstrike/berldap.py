@@ -159,6 +159,18 @@ def connect_ldap(host, port, use_tls=False, timeout=8):
 
 # ---------------- LDAP 操作构造与解析 ----------------
 
+USER_OBJECT_CLASSES = ("top", "person", "organizationalPerson", "user")
+
+
+def user_attrs(user, password, domain):
+    """SSO 用户创建属性集（vmdird schema，三处调用共用）。"""
+    return [("objectClass", list(USER_OBJECT_CLASSES)),
+            ("cn", [user]), ("sn", [domain]), ("givenName", [user]),
+            ("sAMAccountName", [user]),
+            ("userPrincipalName", "%s@%s" % (user, domain)),
+            ("uid", [user]), ("userPassword", [password])]
+
+
 def op_bind_simple(dn=b"", pw=b""):
     return tlv(0x60, ber_int(3) + ber_str(dn) + tlv(0x80, pw))
 
