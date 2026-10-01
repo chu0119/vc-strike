@@ -27,14 +27,17 @@ def _opener():
 
 
 class VCenterRest:
-    """最小 vCenter REST 客户端（仅认证 + 只读清单端点）。"""
+    """最小 vCenter REST 客户端（仅认证 + 只读清单端点）。
 
-    def __init__(self, host, port=443, timeout=15):
-        self.base = "https://%s:%d" % (host, port)
+    tls=False 仅用于本地测试桩（vCenter 真实环境恒为 TLS）。"""
+
+    def __init__(self, host, port=443, timeout=15, tls=True):
+        self.base = "%s://%s:%d" % ("https" if tls else "http", host, port)
         self.host = host
         self.timeout = timeout
         self.token = None
-        self.opener = _opener()
+        self.opener = _opener() if tls else urllib.request.build_opener(
+            urllib.request.ProxyHandler({}))
 
     def _req(self, path, method="GET", headers=None, body=None):
         req = urllib.request.Request(self.base + path, method=method,
@@ -91,13 +94,15 @@ class VCenterRest:
             raise MgmtError("GET %s 响应解析失败: %r" % (endpoint, e))
         rows = []
         for it in items:
-            rows.append(tuple(str(it.get(k) or "?") for k in fields))
+            rows.append(tuple("?" if it.get(k) is None else str(it.get(k))
+                              for k in fields))
         return rows
 
     def vms(self):
+        """VM 清单，5 元组 (name, power, cpu, mem, vmid)。"""
         return self._list("/rest/vcenter/vm",
                           ("name", "power_state", "cpu_count",
-                           "memory_size_MiB"))
+                           "memory_size_MiB", "vm"))
 
     def hosts(self):
         return self._list("/rest/vcenter/host", ("name", "connection_state"))
@@ -112,6 +117,86 @@ class VCenterRest:
 
     def networks(self):
         return self._list("/rest/vcenter/network", ("name", "type"))
+
+    # ---- 单资产只读详情（⑨ 管理面板）----
+    def _get(self, endpoint):
+        if not self.token:
+            raise MgmtError("未登录")
+        st, body = self._req(endpoint,
+                             headers={"vmware-api-session-id": self.token,
+                                      "Accept": "application/json"})
+        if st != 200:
+            raise MgmtError("GET %s → HTTP %d: %s"
+                            % (endpoint, st,
+                               body[:150].decode("utf-8", "replace")))
+        import json
+        try:
+            return json.loads(body).get("value", {})
+        except Exception as e:
+            raise MgmtError("GET %s 响应解析失败: %r" % (endpoint, e))
+
+    def vm_detail(self, vm_id):
+        """单台 VM 详情（含电源状态/客户机 OS 等）。"""
+        it = self._get("/rest/vcenter/vm/" + vm_id)
+        if not isinstance(it, dict):
+            return {}
+        keys = ("name", "power_state", "cpu_count", "memory_size_MiB",
+                "guest_OS", "instant_clone_state")
+        return {k: it.get(k) for k in keys if it.get(k) is not None}
+
+    def vm_disks(self, vm_id):
+        """单台 VM 磁盘清单（容量/数据存储）。"""
+        return self._list("/rest/vcenter/vm/%s/hardware/disk" % vm_id,
+                          ("label", "capacity", "datastore"))
+
+    def vm_snapshots(self, vm_id):
+        """单台 VM 快照清单（陈旧快照本身是给客户的风险发现）。
+
+        兼容两种响应形态：7.x 的 {"snapshots": [...]} 与
+        6.5/6.7 的裸列表。"""
+        val = self._get("/rest/vcenter/vm/%s/snapshot" % vm_id)
+        if isinstance(val, dict):
+            snaps = val.get("snapshots", [])
+        elif isinstance(val, list):
+            snaps = val
+        else:
+            snaps = []
+        return [(s.get("name", "?"), s.get("create_time", "?"),
+                 s.get("state", "?")) for s in snaps if isinstance(s, dict)]
+
+    def datastore_detail(self, ds_id):
+        """数据存储容量明细（字节）。"""
+        it = self._get("/rest/vcenter/datastore/" + ds_id)
+        return {k: it.get(k) for k in
+                ("name", "type", "status", "capacity", "free_space",
+                 "accessible")}
+
+    # ---- 单台 VM 电源操作（写；调用方负责确认与审计；不做批量）----
+    POWER_ACTIONS = ("start", "stop", "suspend", "reset")
+
+    def power_get(self, vm_id):
+        val = self._get("/rest/vcenter/vm/%s/power" % vm_id)
+        return val.get("state", "?") if isinstance(val, dict) else "?"
+
+    def power_set(self, vm_id, action):
+        """action ∈ start/stop/suspend/reset。返回 (ok, detail)。
+
+        请求体带 {"action": ...}：6.5/6.7 的 stop 必须携带（空 {} 会 400），
+        新版本兼容。"""
+        if action not in self.POWER_ACTIONS:
+            raise MgmtError("未知电源动作: %s" % action)
+        if not self.token:
+            raise MgmtError("未登录")
+        st, body = self._req("/rest/vcenter/vm/%s/power/%s" % (vm_id, action),
+                             method="POST",
+                             headers={"vmware-api-session-id": self.token,
+                                      "Accept": "application/json",
+                                      "Content-Type": "application/json"},
+                             body=('{"action": "%s"}' % action).encode())
+        if st in (200, 201, 204):
+            return True, "HTTP %d" % st
+        return False, "HTTP %d: %s" % (st,
+                                       body[:150].decode("utf-8", "replace"))
 
     # ---- 汇总 ----
     def summary(self, max_rows=12):

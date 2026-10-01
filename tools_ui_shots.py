@@ -101,9 +101,9 @@ def main(outdir, size=None):
 
     names = ["01-目标与指纹", "02-CVE-2026-59310", "03-CVE-2026-59309",
              "04-C2会话", "05-后渗透", "06-清理中心", "07-检测与加固",
-             "08-一键打通"]
+             "08-一键打通", "09-vSphere管理"]
     shots = []
-    for i in range(8):
+    for i in range(9):
         app.nb.select(i)
         # 强制窗口置顶 + 激活，防止截到其它窗口（Agent 审查发现的历史问题）
         root.attributes("-topmost", True)

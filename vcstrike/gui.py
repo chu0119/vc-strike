@@ -201,14 +201,15 @@ class ToolApp:
         self.nb = ttk.Notebook(body)
         self.nb.pack(fill="both", expand=True)
         tabs = []
-        for _ in range(8):
+        for _ in range(9):
             tabs.append(ttk.Frame(self.nb))
         self.tab_target, self.tab_59310, self.tab_59309, self.tab_shell, \
-            self.tab_postex, self.tab_clean, self.tab_detect, self.tab_chain = tabs
+            self.tab_postex, self.tab_clean, self.tab_detect, self.tab_chain, \
+            self.tab_vops = tabs
         for w, name in zip(tabs, (" ① 目标与指纹 ", " ② CVE-2026-59310 利用 ",
                                   " ③ CVE-2026-59309 利用 ", " ④ C2 / 反弹 Shell ",
                                   " ⑤ 后渗透 ", " ⑥ 清理中心 ", " ⑦ 检测与加固 ",
-                                  " ⑧ 一键打通 ")):
+                                  " ⑧ 一键打通 ", " ⑨ vSphere 管理 ")):
             self.nb.add(w, text=name)
 
         self.cur_target = tk.StringVar()
@@ -222,6 +223,7 @@ class ToolApp:
         self._build_tab_clean()
         self._build_tab_detect()
         self._build_tab_chain()
+        self._build_tab_vops()
 
         logf = ttk.Frame(self.pw)
         self.pw.add(logf, weight=1)
@@ -912,9 +914,10 @@ class ToolApp:
             value="cn=administrator,cn=Users,dc=vsphere,dc=local")
         ttk.Entry(af, textvariable=self.v590_rstuser, width=24).grid(
             row=2, column=1, columnspan=2, sticky="ew", padx=2)
-        ttk.Label(af, text="新密码").grid(row=2, column=3)
+        ttk.Label(af, text="新密码").grid(row=2, column=3, padx=(6, 2))
         self.v590_rstpass = tk.StringVar(value=rand_name(12))
-        ttk.Entry(af, textvariable=self.v590_rstpass, width=11).grid(row=2, column=4)
+        ttk.Entry(af, textvariable=self.v590_rstpass, width=11).grid(
+            row=2, column=4, padx=(0, 4))
         ttk.Button(af, text="重置该账户密码（ldapmodify replace）",
                    style="Danger.TButton", command=self._b309_resetpw).grid(
             row=3, column=0, columnspan=5, sticky="we", padx=4, pady=4)
@@ -1649,6 +1652,13 @@ class ToolApp:
                             "ldapdelete '%s'" % r.udn)
                 self.creds["SSO管理员@%s" % host] = "%s / %s" % (r.upn, r.password)
                 self.log("[+] 一键打通完成（%s）" % r.via, "+")
+
+                def _prefill(upn=r.upn, pw=r.password):
+                    # ⑨ vSphere 管理页自动预填交付账户
+                    self.vv_host.set(host)
+                    self.vv_user.set(upn)
+                    self.vv_pass.set(pw)
+                self.root.after(0, _prefill)
             else:
                 self.log("[!] 一键打通未成功，各阶段明细见上方与日志", "!")
         self.run_bg(work, "一键打通")
@@ -1669,6 +1679,267 @@ class ToolApp:
             self.log("[+] 测试报告已导出: %s" % f, "+")
         except OSError as e:
             self.log("[!] 报告导出失败: %s" % e, "!")
+
+    # ================= Tab9 vSphere 管理 =================
+    def _build_tab_vops(self):
+        f = self.tab_vops
+        f.columnconfigure(0, weight=3)
+        f.columnconfigure(1, weight=2)
+        f.rowconfigure(1, weight=1)
+        _bar, tv = self._target_bar(f)
+        self.vv_host = tv
+
+        left = ttk.Frame(f)
+        left.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        right = ttk.Frame(f)
+        right.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+
+        lf = ttk.LabelFrame(left, text="账户（交付的 SSO 管理员或其它有效账户）")
+        lf.pack(fill="x", pady=4)
+        ttk.Label(lf, text="账户:").pack(side="left", padx=4)
+        self.vv_user = tk.StringVar()
+        ttk.Entry(lf, textvariable=self.vv_user, width=22).pack(
+            side="left", fill="x", expand=True, padx=2)
+        ttk.Label(lf, text="密码:").pack(side="left", padx=4)
+        self.vv_pass = tk.StringVar()
+        ttk.Entry(lf, textvariable=self.vv_pass, width=18, show="*").pack(
+            side="left", padx=2)
+        ttk.Button(lf, text="登录并刷新", style="Acc.TButton",
+                   command=self._vv_refresh).pack(side="left", padx=6)
+
+        vf = ttk.LabelFrame(left, text="虚拟机清单（只读）")
+        vf.pack(fill="both", expand=True, pady=4)
+        wrapf = ttk.Frame(vf)
+        wrapf.pack(fill="both", expand=True, padx=4, pady=4)
+        self.vv_tree = ttk.Treeview(wrapf, columns=("power", "cpu", "mem", "vmid"),
+                                    show="tree headings")
+        self.vv_tree.heading("#0", text="名称")
+        for c, t, w in (("power", "电源", 90), ("cpu", "vCPU", 50),
+                        ("mem", "内存MiB", 70), ("vmid", "VM-ID", 200)):
+            self.vv_tree.heading(c, text=t)
+            self.vv_tree.column(c, width=w, anchor="w")
+        sy = ttk.Scrollbar(wrapf, orient="vertical",
+                           command=self.vv_tree.yview)
+        sx = ttk.Scrollbar(wrapf, orient="horizontal",
+                           command=self.vv_tree.xview)
+        self.vv_tree.pack(side="left", fill="both", expand=True)
+        sy.pack(side="left", fill="y")
+        sx.pack(side="bottom", fill="x")
+        self.vv_tree.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
+
+        rf = ttk.LabelFrame(right, text="只读检查")
+        rf.pack(fill="x", pady=4)
+        rbar = ttk.Frame(rf)
+        rbar.pack(fill="x", padx=4, pady=2)
+        ttk.Button(rbar, text="VM 详情", command=self._vv_detail).pack(
+            side="left", padx=2)
+        ttk.Button(rbar, text="磁盘清单", command=self._vv_disks).pack(
+            side="left", padx=2)
+        ttk.Button(rbar, text="快照清单", command=self._vv_snaps).pack(
+            side="left", padx=2)
+        ttk.Button(rbar, text="数据存储容量", command=self._vv_ds).pack(
+            side="left", padx=2)
+        ttk.Label(rf, text="VM-ID 取自左侧清单的 VM-ID 列（双击行可复制）。",
+                  style="Muted.TLabel").pack(anchor="w", padx=6, pady=(0, 2))
+
+        of = ttk.LabelFrame(right, text="电源操作（单台 · 写操作 · 全程审计）")
+        of.pack(fill="x", pady=4)
+        obar = ttk.Frame(of)
+        obar.pack(fill="x", padx=4, pady=2)
+        ttk.Label(obar, text="动作:").pack(side="left")
+        self.vv_action = tk.StringVar(value="start")
+        ttk.Combobox(obar, textvariable=self.vv_action,
+                     values=["start", "stop", "suspend", "reset"], width=9,
+                     state="readonly").pack(side="left", padx=4)
+        ttk.Label(obar, text="输入 VM-ID 确认:").pack(side="left", padx=(8, 2))
+        self.vv_confirm = tk.StringVar()
+        ttk.Entry(obar, textvariable=self.vv_confirm, width=16).pack(
+            side="left", fill="x", expand=True, padx=2)
+        ttk.Button(of, text="执行电源操作（需输入与 VM-ID 完全一致的标识）",
+                   style="Danger.TButton", command=self._vv_power).pack(
+            fill="x", padx=4, pady=2)
+        self._wrap_lbl(of, "护栏：仅单台、需输入完整 VM-ID 确认、动作全程入日志"
+                           "并登记 ⑥ 清理中心；不做批量操作。授权报告注明影响即可，"
+                           "请在 RoE 允许范围内使用。")
+        xf = ttk.LabelFrame(right, text="输出")
+        xf.pack(fill="both", expand=True, pady=4)
+        self.vv_out = tk.Text(xf, height=10, bg=COLORS["logbg"], fg=COLORS["fg"],
+                              relief="flat", highlightthickness=1,
+                              highlightbackground=COLORS["border"],
+                              highlightcolor=COLORS["border"],
+                              font=(self.font_family, 9))
+        self.vv_out.pack(fill="both", expand=True, padx=4, pady=4)
+        self._vv_conn = None      # 已登录的 VCenterRest（登录后复用）
+
+    def _vv_out_append(self, text):
+        self.vv_out.insert("end", text if text.endswith("\n") else text + "\n")
+        self.vv_out.see("end")
+
+    def _vv_client(self, host, user, password):
+        """返回已登录连接；未登录则现场登录（仅后台线程调用）。"""
+        from .mgmt import VCenterRest, MgmtError
+        if self._vv_conn is not None:
+            return self._vv_conn
+        if not host or not user:
+            raise MgmtError("需要目标与账户")
+        c = VCenterRest(host, 443)
+        c.login(user, password)
+        self._vv_conn = c
+        return c
+
+    def _vv_reconnect_on_auth_error(self, host, user, password, e):
+        """401/会话失效 → 丢弃缓存连接重登一次；非认证错误返回 None。"""
+        from .mgmt import MgmtError
+        s = str(e)
+        if "401" in s or "认证失败" in s:
+            self._vv_conn = None
+            return self._vv_connect(host, user, password)
+        if isinstance(e, MgmtError):
+            raise e
+        raise e
+
+    def _vv_creds(self):
+        return (self.vv_host.get().strip().split(":")[0],
+                self.vv_user.get().strip(), self.vv_pass.get())
+
+    def _vv_refresh(self):
+        host, user, password = self._vv_creds()
+
+        def work():
+            try:
+                c = self._vv_client(host, user, password)
+                rows = c.vms()
+            except Exception as e:
+                self.log("[!] 清单采集失败: %s" % e, "!")
+                return
+
+            def _fill():
+                self.vv_tree.delete(*self.vv_tree.get_children())
+                for name, power, cpu, mem, vmid in rows:
+                    self.vv_tree.insert("", "end", text=name,
+                                        values=(power, cpu, mem, vmid))
+                self._vv_out_append("== 清单刷新完成：%d 台 VM ==" % len(rows))
+            self.root.after(0, _fill)
+            self.log("[+] vSphere 清单已刷新：%d 台 VM（%s）"
+                     % (len(rows), self.vv_host.get()), "+")
+        self.run_bg(work, "清单刷新")
+
+    def _vv_sel(self):
+        sel = self.vv_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "先在清单中选择一台 VM")
+            return None
+        vals = self.vv_tree.item(sel[0], "values")
+        name = self.vv_tree.item(sel[0], "text")
+        return vals[3], name          # vmid, name
+
+    def _vv_run_read(self, title, fn):
+        """只读检查统一入口：主线程取凭据，401 自动重登一次。"""
+        from .mgmt import MgmtError
+        host, user, password = self._vv_creds()
+
+        def work():
+            try:
+                try:
+                    c = self._vv_client(host, user, password)
+                    out = fn(c)
+                except MgmtError as e:
+                    s = str(e)
+                    if "401" in s or "认证失败" in s:
+                        self._vv_conn = None
+                        c = self._vv_connect(host, user, password)
+                        out = fn(c)
+                    else:
+                        raise
+                self.root.after(0, lambda: self._vv_out_append(out))
+                self.log("[+] %s 完成" % title, "+")
+            except Exception as e:
+                self.log("[!] %s 失败: %s" % (title, e), "!")
+        self.run_bg(work, title)
+
+    def _vv_detail(self):
+        sel = self._vv_sel()
+        if not sel:
+            return
+        vmid, _name = sel
+        self._vv_run_read("VM 详情", lambda c: "\n".join(
+            "  %s: %s" % (k, v) for k, v in c.vm_detail(vmid).items()))
+
+    def _vv_disks(self):
+        sel = self._vv_sel()
+        if not sel:
+            return
+        vmid, _name = sel
+        self._vv_run_read("磁盘清单", lambda c: "\n".join(
+            ["  磁盘（%d）:" % len(c.vm_disks(vmid))] +
+            ["    · " + " | ".join(r) for r in c.vm_disks(vmid)]))
+
+    def _vv_snaps(self):
+        sel = self._vv_sel()
+        if not sel:
+            return
+        vmid, _name = sel
+
+        def fn(c):
+            rows = c.vm_snapshots(vmid)
+            if not rows:
+                return "  快照：无"
+            return "\n".join(["  快照（%d）——陈旧快照建议列入风险发现:" % len(rows)] +
+                             ["    · " + " | ".join(r) for r in rows])
+        self._vv_run_read("快照清单", fn)
+
+    def _vv_ds(self):
+        self._vv_run_read("数据存储容量", lambda c: "\n".join(
+            ["  数据存储（%d）:" % len(c.datastores())] +
+            ["    · " + " | ".join(r) for r in c.datastores()]))
+
+    def _vv_power(self):
+        sel = self._vv_sel()
+        if not sel:
+            messagebox.showinfo("提示", "先在清单中选择一台 VM")
+            return
+        vmid, name = sel
+        action = self.vv_action.get()
+        confirm = self.vv_confirm.get().strip()
+        if confirm != vmid:
+            messagebox.showwarning(
+                "提示", "确认失败：请输入与 VM-ID 完全一致的标识后重试\n"
+                        "（当前 VM: %s，VM-ID: %s）" % (name, vmid))
+            return
+        if not messagebox.askyesno(
+                "二次确认",
+                "对 %s（%s）执行电源操作「%s」？\n这是对客户资产的写操作，"
+                "请确认 RoE 允许。" % (name, vmid, action)):
+            return
+        host, user, password = self._vv_creds()
+
+        def work():
+            from .mgmt import MgmtError
+            try:
+                try:
+                    c = self._vv_client(host, user, password)
+                    ok, detail = c.power_set(vmid, action)
+                except MgmtError as e:
+                    s = str(e)
+                    if "401" in s or "认证失败" in s:
+                        self._vv_conn = None
+                        c = self._vv_connect(host, user, password)
+                        ok, detail = c.power_set(vmid, action)
+                    else:
+                        raise
+                msg = "电源[%s] %s（%s）→ %s" % (action, name, vmid, detail)
+                if ok and action in ("start", "reset"):
+                    msg += "，当前状态 %s" % c.power_get(vmid)
+                elif action == "stop":
+                    msg += "（软关机发起，状态需数秒后复查）"
+                self.root.after(0, lambda: self._vv_out_append(msg))
+                self.log("[%s] %s" % ("+" if ok else "!", msg),
+                         "+" if ok else "!")
+                self.record("vops-电源", host, "%s %s" % (action, name),
+                            "（写操作；如需恢复请执行相反动作）")
+            except Exception as e:
+                self.log("[!] 电源操作失败: %s" % e, "!")
+        self.run_bg(work, "电源操作")
 
     # ================= Tab6 清理中心 =================
     def _build_tab_clean(self):

@@ -13,6 +13,8 @@
   ldap59309     SSO 目录操作（枚举/建管/改密/查询）
   postex        后渗透（信息/凭据/IOC 快扫/自定义命令）
   chain         一键打通：59310/59309 联动交付 SSO 管理员
+  mgmt          vSphere 资产盘点（REST 只读）
+  vops          vSphere 单台 VM 操作（详情/快照/电源，写操作需确认）
   selftest      自检
   gui           图形界面
 """
@@ -154,6 +156,17 @@ def build_parser():
     s.add_argument("--user", required=True, help="SSO 账户（如 user@vsphere.local）")
     s.add_argument("--pass", dest="password", required=True)
     s.add_argument("--port", type=int, default=443)
+
+    s = sub.add_parser("vops", help="vSphere 单台 VM 操作（只读详情/快照/电源）")
+    s.add_argument("host")
+    s.add_argument("--user", required=True)
+    s.add_argument("--pass", dest="password", required=True)
+    s.add_argument("--port", type=int, default=443)
+    s.add_argument("--action", required=True,
+                   choices=["vms", "detail", "disks", "snapshots", "power-on",
+                            "power-off", "suspend", "reset"],
+                   help="vms=清单；detail/disks/snapshots 需 --vm")
+    s.add_argument("--vm", default=None, help="VM 标识（vms 可列出）")
     return p
 
 
@@ -427,6 +440,60 @@ def cmd_mgmt(a):
         return 1
 
 
+def cmd_vops(a):
+    from .mgmt import VCenterRest, MgmtError
+    host = a.host.split(":")[0]
+    c = VCenterRest(host, a.port)
+    try:
+        c.login(a.user, a.password)
+        if a.action == "vms":
+            for name, power, cpu, mem, vmid in c.vms():
+                print("%-28s %-12s vCPU=%-3s mem=%-7s %s"
+                      % (name, power, cpu, mem, vmid))
+        elif a.action in ("detail", "disks", "snapshots"):
+            if not a.vm:
+                print("[-] 需要 --vm")
+                return 2
+            if a.action == "detail":
+                for k, v in c.vm_detail(a.vm).items():
+                    print("%s: %s" % (k, v))
+            elif a.action == "disks":
+                for r in c.vm_disks(a.vm):
+                    print(" | ".join(r))
+            else:
+                snaps = c.vm_snapshots(a.vm)
+                if not snaps:
+                    print("快照：无")
+                for s in snaps:
+                    print(" | ".join(s))
+        else:                                    # 电源操作
+            if not a.vm:
+                print("[-] 需要 --vm")
+                return 2
+            act = {"power-on": "start", "power-off": "stop",
+                   "suspend": "suspend", "reset": "reset"}[a.action]
+            if act in ("stop", "reset", "suspend"):
+                try:
+                    ok = input("对 %s 执行 %s？输入 VM 标识确认: " % (a.vm, act))
+                except (EOFError, KeyboardInterrupt):
+                    ok = None
+                if ok != a.vm:
+                    print("[-] 已取消（确认输入不匹配或中断）")
+                    return 2
+            ok, detail = c.power_set(a.vm, act)
+            print("[%s] 电源[%s] %s → %s" % ("+" if ok else "-", a.action,
+                                             a.vm, detail))
+            if ok:
+                print("[审计] 电源写操作已执行（action=%s vm=%s）" % (act, a.vm))
+            return 0 if ok else 1
+        return 0
+    except MgmtError as e:
+        print("[-] %s" % e)
+        return 1
+    finally:
+        c.logout()
+
+
 def cmd_postex(a):
     if a.action == "cmd":
         if not a.cmdline:
@@ -495,7 +562,7 @@ def _dispatch(a):
           "webshell": cmd_webshell, "revshell": cmd_revshell,
           "listen": cmd_listen, "check59309": cmd_check59309,
           "ldap59309": cmd_ldap59309, "postex": cmd_postex,
-          "chain": cmd_chain, "mgmt": cmd_mgmt}[a.cmd]
+          "chain": cmd_chain, "mgmt": cmd_mgmt, "vops": cmd_vops}[a.cmd]
     try:
         return fn(a)
     except (ConnectionError, OSError, ValueError, ssl.SSLError) as e:
