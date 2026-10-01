@@ -449,9 +449,19 @@ def cmd_vops(a):
     try:
         c.login(a.user, a.password)
         if a.action == "vms":
-            for name, power, cpu, mem, vmid in c.vms():
-                print("%-28s %-12s vCPU=%-3s mem=%-7s %s"
-                      % (name, power, cpu, mem, vmid))
+            try:
+                for name, power, cpu, mem, vmid in c.vms():
+                    print("%-28s %-12s vCPU=%-3s mem=%-7s %s"
+                          % (name, power, cpu, mem, vmid))
+            except MgmtError as e:
+                print("[-] VM 清单端点失败（6.x REST 支持不完整时属预期）: %s" % e)
+                print("[*] 降级为全端点盘点：")
+                c2 = VCenterRest(host, a.port)
+                c2.login(a.user, a.password)
+                try:
+                    print(c2.summary())
+                finally:
+                    c2.logout()
         elif a.action in ("detail", "disks", "snapshots"):
             if not a.vm:
                 print("[-] 需要 --vm")

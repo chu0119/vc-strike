@@ -20,6 +20,26 @@ class MgmtError(Exception):
     pass
 
 
+def vapi_error(body):
+    """从 vAPI 结构化错误响应提取可读文本（default_message 等）。
+
+    6.x 常见：{"type":"...internal_server_error","value":{"messages":
+    [{"default_message":"Provider method implementation ..."}]}}"""
+    try:
+        import json
+        d = json.loads(body)
+        val = d.get("value") or {}
+        msgs = val.get("messages") or []
+        parts = [m.get("default_message") for m in msgs
+                 if isinstance(m, dict) and m.get("default_message")]
+        t = d.get("type") or ""
+        detail = " | ".join(parts) if parts else \
+            body[:300].decode("utf-8", "replace")
+        return ("[%s] %s" % (t, detail)) if t else detail
+    except Exception:
+        return body[:300].decode("utf-8", "replace")
+
+
 def _opener():
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -65,7 +85,8 @@ class VCenterRest:
         if st == 401:
             raise MgmtError("认证失败（账户/密码错误或被锁定）")
         if st != 201 and st != 200:
-            raise MgmtError("登录失败 HTTP %d: %s" % (st, body[:200].decode("utf-8", "replace")))
+            raise MgmtError("登录失败 HTTP %d: %s"
+                            % (st, vapi_error(body)))
         try:
             import json
             self.token = json.loads(body)["value"]
@@ -90,7 +111,8 @@ class VCenterRest:
                              headers={"vmware-api-session-id": self.token,
                                       "Accept": "application/json"})
         if st != 200:
-            raise MgmtError("GET %s → HTTP %d: %s" % (endpoint, st, body[:150].decode("utf-8", "replace")))
+            raise MgmtError("GET %s → HTTP %d: %s"
+                            % (endpoint, st, vapi_error(body)))
         import json
         try:
             items = json.loads(body).get("value", [])
@@ -134,8 +156,7 @@ class VCenterRest:
                                       "Accept": "application/json"})
         if st != 200:
             raise MgmtError("GET %s → HTTP %d: %s"
-                            % (endpoint, st,
-                               body[:150].decode("utf-8", "replace")))
+                            % (endpoint, st, vapi_error(body)))
         import json
         try:
             return json.loads(body).get("value", {})
@@ -202,11 +223,10 @@ class VCenterRest:
                              body=('{"action": "%s"}' % action).encode())
         if st in (200, 201, 204):
             return True, "HTTP %d" % st
-        return False, "HTTP %d: %s" % (st,
-                                       body[:150].decode("utf-8", "replace"))
+        return False, "HTTP %d: %s" % (st, vapi_error(body))
 
     # ---- 汇总 ----
-    def summary(self, max_rows=12):
+    def summary(self, max_rows=12, log=None):
         def table(title, headers, rows):
             out = ["  %s（%d）: %s" % (title, len(rows),
                                        " | ".join(headers))]

@@ -1950,9 +1950,27 @@ class ToolApp:
         def work():
             try:
                 c = self._vv_client(host, user, password)
+            except Exception as e:
+                self.log("[!] 登录失败: %s" % e, "!")
+                return
+            try:
                 rows = c.vms()
             except Exception as e:
-                self.log("[!] 清单采集失败: %s" % e, "!")
+                # 该 vCenter 版本对 /rest/vcenter/vm 支持不完整（6.x 常见）→
+                # 降级为全端点尝试，能采多少展示多少
+                self.log("[!] VM 清单端点失败: %s" % e, "!")
+                self.log("[*] 降级为全端点尝试…", "m")
+                try:
+                    fallback = c.summary(log=lambda s: self.log(s, "m"))
+                except Exception as e2:
+                    self.log("[!] 降级盘点也失败: %s" % e2, "!")
+                    return
+
+                def _fill_fb(fallback=fallback):
+                    self.vv_tree.delete(*self.vv_tree.get_children())
+                    self._vv_out_append(fallback)
+                self.root.after(0, _fill_fb)
+                self.log("[i] 已展示可用的部分清单（明细见输出区）", "m")
                 return
 
             def _fill():

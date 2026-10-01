@@ -3,6 +3,16 @@
 本项目的显著变更记录。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.6.1] - 2026-10-02
+
+### Fixed（实弹反馈）
+- **vSphere 盘点对 6.x 版本降级可用**：实测 6.x vCenter 的
+  `/rest/vcenter/vm` 端点返回 HTTP 500（vAPI "Provider method implementation
+  threw an exception"）。⑨ 页与 `vops vms` 现在自动降级为全端点尝试——
+  主机/数据存储/集群/网络等可用部分照常展示，失败端点保留原因；
+  vAPI 结构化错误（default_message）完整解析，不再截断。
+- ⑧ 打通成功 → ⑨ 预填账户后自动刷新清单。
+
 ## [1.6.0] - 2026-10-02
 
 ### Fixed（三路 Agent 审计：UX / 前后端贯通 / 代码质量）
