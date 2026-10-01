@@ -223,6 +223,35 @@ class TestC2Prune(unittest.TestCase):
             s.close()
 
 
+class TestChain(unittest.TestCase):
+    """chain.py 离线部分：lwregshell 转义还原 / DN 推导（真实实弹值）。"""
+
+    LINE_DN = ('"dcAccountDN"       REG_SZ          '
+               '"cn=10.0.0.99,ou=Domain Controllers,dc=corp,dc=local"')
+    # lwregshell 输出：内嵌引号转义为反斜杠+引号，反斜杠转义为双反斜杠
+    LINE_PW = '"dcAccountPassword" REG_SZ          "S4crubbed-P@ss"'
+
+    def test_parse_lwreg_value(self):
+        from vcstrike.chain import parse_lwreg_value
+        self.assertEqual(parse_lwreg_value(self.LINE_DN),
+                         "cn=10.0.0.99,ou=Domain Controllers,"
+                         "dc=vsphere,dc=local")
+        self.assertEqual(parse_lwreg_value(self.LINE_PW), 'S4crubbed-P@ss')
+        self.assertEqual(parse_lwreg_value('"k"  REG_SZ  "a\\\\b"'), "a\\b")
+        self.assertIsNone(parse_lwreg_value("garbage line"))
+
+    def test_extract_and_derive(self):
+        from vcstrike.chain import (extract_machine_creds, domain_from_dn,
+                                    base_from_dn)
+        dn, pw = extract_machine_creds(self.LINE_DN + "\n" + self.LINE_PW)
+        self.assertEqual(dn, "cn=10.0.0.99,ou=Domain Controllers,"
+                             "dc=vsphere,dc=local")
+        self.assertEqual(pw, 'S4crubbed-P@ss')
+        self.assertEqual(domain_from_dn(dn), "vsphere.local")
+        self.assertEqual(base_from_dn(dn), "dc=vsphere,dc=local")
+        self.assertEqual(domain_from_dn("cn=x,dc=a,dc=b,c=cn"), "a.b")
+
+
 class Test59310(unittest.TestCase):
     def test_vectors(self):
         app = traversal_app("etc/cron.d/x")

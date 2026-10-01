@@ -3,6 +3,16 @@
 本项目的显著变更记录。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.3.0] - 2026-10-01
+
+### Added
+- **⑧ 一键打通（全链路）** 模块（GUI 新页签 + CLI `chain` 子命令）：
+  只填目标 IP，自动执行 S0 指纹 → S1 59310 RCE → S2 机器账户+SSO 域提取 →
+  S3 目录接管（机器账户 simple bind 首选，59309 SRP 绕过降级）→
+  S4 新建管理员并加入 Administrators → S5 新账户 bind 回验+组成员确认 →
+  S6 交付卡片 + 自动登记 ⑥ 清理中心。三路自动降级，交付即终点（不做
+  /ui 后续动作与持久化）。全程日志落盘。
+
 ## [1.2.2] - 2026-10-01
 
 ### Added

