@@ -109,6 +109,33 @@ class TestSRP(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_server_challenge(b"\x99" * 32)
 
+    def test_parse_challenge_vmdird_4byte_prefix(self):
+        """回放真实目标布局：creds = 4B BE 长度 + { 0x00 mpi(N) mpi(g) os(s)
+        mpi(B) utf8(L) }，N 用 RFC5054 2048 位素数（真实目标实测头 32B:
+        00000331000100ac6bdb41324a9a9b...，821 = 4 + 817）。"""
+        import struct
+        from vcstrike.srp59309 import parse_server_challenge
+        N = int(
+            "AC6BDB41324A9A9BF166DE5E1389582FAF72B6651987EE07FC3192943DB56050A"
+            "37329CBB4A099ED8193E0757767A13DD52312AB4B03310DCD7F48A9DA04FD50E8"
+            "083969EDB767B0CF6095179A163AB3661A05FBD5FAAAE82918A9962F0B93B855F"
+            "97993EC975EEAA80D740ADBF4FF747359D041D5C33EA71D281E446B14773BCA97"
+            "B43A23FB801676BD207A436C6481F1D2B9078717461A5B9D32E688F8774854452"
+            "3B524B0D57D5EA77A2775D2ECFA032CFBDBF52FB3786160279004E57AE6AF874E"
+            "7303CE53299CCC041C7BC308D82A5698F3A8D0C38271AE35F8E9DBFBB694B5C80"
+            "3D89F7AE435DE236D525F54759B65E372FCD68EF20FA7111F9E4AFF73", 16)
+        B = N - 1
+        salt = bytes(range(16))
+        L = ("mda=SHA-1,replay_detection,integrity=HMAC-SHA-1,"
+             "confidentiality=AES,mandatory=confidentiality,mandatory=integrity,"
+             "mandatory=replay_detection,maxbuffersize=2147483647")
+        inner = b"\x00" + srp_mpi(N) + srp_mpi(2) + srp_os(salt) + srp_mpi(B) + srp_s(L)
+        creds = struct.pack(">I", len(inner)) + inner
+        self.assertEqual(struct.unpack(">I", creds[:4])[0], len(creds) - 4)
+        N2, g2, salt2, B2, L2 = parse_server_challenge(creds)
+        self.assertEqual((N2, g2, salt2, B2), (N, 2, salt, B))
+        self.assertEqual(L2.decode(), L)
+
     def test_m1_deterministic(self):
         import hashlib
         N = int("EEAF0AB9ADB38DD69C33F80AFA8FC5E86072618775FF3C0B9EA2314C9C256576"

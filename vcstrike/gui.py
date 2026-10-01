@@ -10,6 +10,7 @@ import base64
 import csv
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -244,8 +245,11 @@ class ToolApp:
             pass
         self.root.after(120, self._poll_log)
 
+    _LEAD = re.compile(r"^\[[+!widm~]\]\s*")
+
     def log(self, msg, level="i"):
-        logutil.write(level, msg)
+        # 日志文件里级别已有 [level] 标注，去掉消息自带的重复前缀
+        logutil.write(level, self._LEAD.sub("", msg, count=1))
         self.logq.put((level, msg))
 
     def _log_clear(self):

@@ -198,37 +198,54 @@ class SRPLayer:
         return self.dec.crypt(body) if self.conf else body
 
 
+def _strip_len_prefix(creds):
+    """vmdird（Likewise 分叉）的 SASL credentials 收发都带一层 4B BE 长度
+    前缀（值 = len-4，实测 2026-10 真实目标 821B = 4 + 817）；srp.c 原生
+    格式无此前缀。匹配则剥掉，不匹配原样返回。"""
+    if len(creds) >= 4:
+        outer = int.from_bytes(creds[:4], "big")
+        if outer == len(creds) - 4:
+            return creds[4:]
+    return creds
+
+
 def parse_server_challenge(creds):
     """解析 step1 挑战 { 0x00 mpi(N) mpi(g) os(s) mpi(B) utf8(L) }。
 
-    srp.c 布局含前导 0x00（reuse 标志）；vmdird 加载的 Likewise libsrp
-    实测布局存在差异（真实目标 821B 挑战按固定布局解析会越界），因此按
-    候选偏移做带合理性约束的探测解析，全部字段通过校验才接受。
+    兼容三种布局：vmdird 的 4B 长度前缀包裹、srp.c 原生（带前导 0x00
+    reuse 标志）、以及无前导字节的变体。全部字段通过合理性校验才接受，
     失败抛 ValueError（含前 32 字节 hex 供诊断）。
     """
+    candidates = [_strip_len_prefix(creds), creds]
     errs = []
-    for skip in (0, 1):
-        try:
-            u = SRPUnpack(creds)
-            u.o = skip
-            N = u.mpi()
-            g = u.mpi()
-            salt = u.os()
-            B = u.mpi()
-            L = u.s()
-            if not 64 <= N.bit_length() <= 8192:
-                raise ValueError("N 位数异常(%d)" % N.bit_length())
-            if g <= 1 or g >= N:
-                raise ValueError("g 异常(%d)" % g)
-            if not 0 < len(salt) <= 128:
-                raise ValueError("salt 长度异常(%d)" % len(salt))
-            if not 1 <= B.bit_length() <= N.bit_length():
-                raise ValueError("B 位数异常(%d)" % B.bit_length())
-            if len(creds) - u.o > 4:
-                raise ValueError("尾部多余 %d 字节" % (len(creds) - u.o))
-            return N, g, salt, B, L
-        except Exception as e:
-            errs.append("off=%d: %s" % (skip, e))
+    seen = []
+    for base in candidates:
+        if base in seen:
+            continue
+        seen.append(base)
+        for skip in (0, 1):
+            try:
+                u = SRPUnpack(base)
+                u.o = skip
+                N = u.mpi()
+                g = u.mpi()
+                salt = u.os()
+                B = u.mpi()
+                L = u.s()
+                if not 64 <= N.bit_length() <= 8192:
+                    raise ValueError("N 位数异常(%d)" % N.bit_length())
+                if g <= 1 or g >= N:
+                    raise ValueError("g 异常(%d)" % g)
+                if not 0 < len(salt) <= 128:
+                    raise ValueError("salt 长度异常(%d)" % len(salt))
+                if not 1 <= B.bit_length() <= N.bit_length():
+                    raise ValueError("B 位数异常(%d)" % B.bit_length())
+                if len(base) - u.o > 4:
+                    raise ValueError("尾部多余 %d 字节" % (len(base) - u.o))
+                return N, g, salt, B, L
+            except Exception as e:
+                errs.append("pre=%s/off=%d: %s" %
+                            ("4Blen" if base is not creds else "raw", skip, e))
     raise ValueError("SRP 挑战解析失败（%d B，头 32B: %s）：%s" %
                      (len(creds), creds[:32].hex(), " | ".join(errs)))
 
@@ -329,8 +346,9 @@ def _srp_bypass_bind(conn, identity, policy="auto", log=lambda s: None):
     if not creds:
         return BypassResult(False, "bind 成功但缺少服务器证据 M2，无法协商安全层")
 
-    # --- 解析 { os(M2) os(sIV) utf8(sid) uint(ttl) } 并验证（防伪服务器） ---
-    u2 = SRPUnpack(creds)
+    # --- 解析 { os(M2) os(sIV) utf8(sid) uint(ttl) } 并验证（防伪服务器）---
+    # vmdird 响应同样带 4B 长度前缀，先剥（_strip_len_prefix 不匹配则原样）
+    u2 = SRPUnpack(_strip_len_prefix(creds))
     M2, sIV, sid, ttl = u2.os(), u2.os(), u2.s(), u2.u32()
     myM2 = hashlib.sha1(
         i2b(A) + M1 + K
