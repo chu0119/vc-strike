@@ -113,6 +113,15 @@ class TestSRP(unittest.TestCase):
         self.assertEqual(len(m1), 20)
 
 
+class TestC2(unittest.TestCase):
+    def test_strip_ansi(self):
+        from vcstrike.c2 import strip_ansi
+        raw = "\x1b[1;31mroot [ \x1b[0m~\x1b[1;31m ]# \x1b[0mls\r\n"
+        self.assertEqual(strip_ansi(raw), "root [ ~ ]# ls\n")
+        raw2 = "\x1b]0;window title\x07prompt\x1b>done"
+        self.assertEqual(strip_ansi(raw2), "promptdone")
+
+
 class Test59310(unittest.TestCase):
     def test_vectors(self):
         app = traversal_app("etc/cron.d/x")

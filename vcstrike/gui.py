@@ -111,6 +111,7 @@ class ToolApp:
                 pass
         self.root.after(120, self._poll_log)
         self.root.after(1000, self._poll_sessions)
+        self.root.after(200, self._poll_term)
         self.log("[i] 就绪。本工具仅用于授权渗透测试 / 漏洞验证。", "i")
         self.log("[i] 推荐流程：①指纹 → ②/③利用 → ⑤后渗透 → ⑥清理。", "m")
 
@@ -1281,6 +1282,20 @@ class ToolApp:
         self.root.after(0, lambda: self.log(
             "[+] 新会话 #%d ← %s（双击会话行开始交互）" % (sess.id, sess.addr), "+"))
 
+    def _poll_term(self):
+        """实时流：当前会话的原始输出直接上屏（ANSI 颜色码已剥离）。"""
+        try:
+            s = self.cur_sess or self._c2_selected()
+            if s and not s.feed_paused:
+                out = s.take_output()
+                if out:
+                    self.term.configure(state="normal")
+                    self.term.insert("end", out)
+                    self.term.see("end")
+        except Exception:
+            pass
+        self.root.after(200, self._poll_term)
+
     def _poll_sessions(self):
         try:
             have = {int(i) for i in self.sess_tree.get_children()}
@@ -1342,19 +1357,12 @@ class ToolApp:
             self.log("[!] 无会话（先监听并等回连，双击会话行）", "!")
             return
         self.shell_cmd.set("")
-        self.term.configure(state="normal")
-        self.term.insert("end", "\n#%d> %s\n" % (s.id, cmd))
-        self.term.see("end")
-
-        def work():
-            try:
-                out = self.c2m.exec(s.id, cmd, timeout=15)
-            except (RuntimeError, OSError) as e:
-                out = "[!] %s\n" % e
-            self.root.after(0, lambda: self._term_append(out))
-            if not s.alive:
-                self.root.after(0, lambda: self._term_append("[!] 会话已断开\n"))
-        threading.Thread(target=work, daemon=True).start()
+        try:
+            # 不做本地回显：远端 PTY 会回显（与原始 POC 的裸 shell 循环一致），
+            # 输出经实时流（_poll_term）直接上屏，ANSI 颜色码已剥离。
+            s.send_line(cmd)
+        except OSError as e:
+            self._term_append("[!] 发送失败: %s" % e)
 
     def _term_append(self, text):
         self.term.configure(state="normal")
