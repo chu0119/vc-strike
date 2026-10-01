@@ -94,7 +94,8 @@ class AES128OFB:
     """AES-128-OFB 流（OpenSSL EVP_aes_128_ofb 兼容：密钥取 K 前 16 字节）。"""
 
     def __init__(self, key16, iv16):
-        assert len(key16) == 16 and len(iv16) == 16
+        if len(key16) != 16 or len(iv16) != 16:
+            raise ValueError("AES-128-OFB 需要 16 字节 key 与 16 字节 IV")
         self._rk = _aes128_expand(key16)
         self._reg = bytes(iv16)
         self._ks = b""

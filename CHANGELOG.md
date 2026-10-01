@@ -21,4 +21,5 @@
   网络/服务/计划任务盘点、59310 入侵痕迹快扫。
 - **清理中心 / 检测加固** 页。
 - 纯 Python AES-128（FIPS-197 向量校验）；BER/LDAP 自实现；零第三方依赖。
-- GUI（tkinter 深色）与 CLI 全功能等价；CI（Ubuntu，selftest + unittest）。
+- GUI（tkinter 深色）与 CLI 利用功能等价（清理中心/检测加固为 GUI 专属）；
+  CI（Ubuntu，selftest + unittest）。

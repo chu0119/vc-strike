@@ -68,6 +68,20 @@ class TestSRP(unittest.TestCase):
         so2 = parse_server_options("")
         self.assertEqual(decide_client_options(so2, "plain"), "")
 
+    def test_options_whitelist(self):
+        # srp.c cipher_options 表序 DES 在 AES 前：必须白名单过滤选 aes，
+        # 否则 bind 成功但安全层（仅实现 AES）永久失步
+        so = parse_server_options(
+            "mda=SHA-1,confidentiality=DES,confidentiality=AES,"
+            "integrity=HMAC-SHA-1,mandatory=confidentiality")
+        self.assertEqual(decide_client_options(so, "auto"),
+                         "mda=sha-1,integrity=hmac-sha-1,confidentiality=aes")
+        # 需要的层不在白名单 → fail-fast
+        so2 = parse_server_options("confidentiality=DES,mandatory=confidentiality")
+        self.assertIsNone(decide_client_options(so2, "auto"))
+        so3 = parse_server_options("integrity=HMAC-MD5,mandatory=integrity")
+        self.assertIsNone(decide_client_options(so3, "auto"))
+
     def test_layer_both_directions(self):
         import secrets
         cIV, sIV = secrets.token_bytes(16), secrets.token_bytes(16)

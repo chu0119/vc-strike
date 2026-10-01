@@ -18,6 +18,7 @@
 import argparse
 import base64
 import csv
+import ssl
 import sys
 import time
 
@@ -414,8 +415,6 @@ def main(argv=None):
         return cmd_gui(None)
     p = build_parser()
     a = p.parse_args(argv)
-    if not a.cmd:
-        return cmd_gui(a)
     if a.cmd == "selftest":
         return run_selftest()
     if a.cmd == "gui":
@@ -425,4 +424,8 @@ def main(argv=None):
           "webshell": cmd_webshell, "revshell": cmd_revshell,
           "listen": cmd_listen, "check59309": cmd_check59309,
           "ldap59309": cmd_ldap59309, "postex": cmd_postex}[a.cmd]
-    return fn(a)
+    try:
+        return fn(a)
+    except (ConnectionError, OSError, ValueError, ssl.SSLError) as e:
+        print("[-] 错误: %s" % e)
+        return 1

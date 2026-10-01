@@ -102,9 +102,14 @@ class LDAPConn:
         tag = self._readn(1)[0]
         l1 = self._readn(1)[0]
         if l1 & 0x80:
-            ln = int.from_bytes(self._readn(l1 & 0x7F), "big")
+            nb = l1 & 0x7F
+            if nb == 0:
+                raise ValueError("LDAP 响应含不定长(0x80)编码，无法解析")
+            ln = int.from_bytes(self._readn(nb), "big")
         else:
             ln = l1
+        if tag != 0x30:
+            raise ValueError("LDAP 帧顶层 tag=0x%02x（预期 0x30 SEQUENCE）" % tag)
         return tag, self._readn(ln)
 
     def send_op(self, op_bytes):
@@ -164,24 +169,28 @@ def op_bind_sasl(mech=b"SRP", creds=None):
 
 
 def parse_bind_response(val):
-    """返回 (resultCode, diag, serverSaslCreds)。diag 取最后一个 OCTET STRING。"""
+    """返回 (resultCode, diag, serverSaslCreds)。
+
+    LDAPResult 字段序固定：resultCode(ENUM), matchedDN(OCTET),
+    errorMessage(OCTET), [serverSaslCreds(0x87)] —— matchedDN 不能当诊断文本。
+    """
     code, diag, creds = None, b"", None
-    for tag, v in ber_children(val):
-        if tag == 0x0A:
+    for i, (tag, v) in enumerate(ber_children(val)):
+        if tag == 0x0A and code is None:
             code = int.from_bytes(v, "big")
-        elif tag == 0x04:
-            diag = v
         elif tag == 0x87:
             creds = v
+        elif tag == 0x04 and i != 1:      # 跳过 matchedDN（第 2 个子项）
+            diag = v
     return code, diag, creds
 
 
 def parse_ldap_result(val):
     code, diag = None, b""
-    for tag, v in ber_children(val):
-        if tag == 0x0A:
+    for i, (tag, v) in enumerate(ber_children(val)):
+        if tag == 0x0A and code is None:
             code = int.from_bytes(v, "big")
-        elif tag == 0x04:
+        elif tag == 0x04 and i != 1:      # 跳过 matchedDN
             diag = v
     return code, diag
 

