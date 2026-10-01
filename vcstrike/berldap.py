@@ -125,6 +125,8 @@ class LDAPConn:
         """返回 (msgid, tag, value)。"""
         if self.layer:
             n = int.from_bytes(self._readn(4), "big")
+            if n > 16 * 1024 * 1024:
+                raise ValueError("安全层帧长 %d 超过 16MB 上限" % n)
             pdu = self.layer.unwrap(self._readn(n))
         else:
             _tag, pdu = self._read_tlv()   # 顶层 SEQUENCE，pdu 为其内容

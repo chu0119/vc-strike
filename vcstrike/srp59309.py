@@ -272,7 +272,8 @@ def srp_bypass_bind(conn, identity, policy="auto", log=lambda s: None):
     """
     try:
         return _srp_bypass_bind(conn, identity, policy, log)
-    except (ValueError, struct.error, ConnectionError, OSError) as e:
+    except (ValueError, struct.error, ConnectionError, OSError,
+            IndexError) as e:
         return BypassResult(False, "协议错误: %s" % e)
 
 

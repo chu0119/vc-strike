@@ -183,8 +183,6 @@ class TestLog(unittest.TestCase):
             self.assertIn("raw 流文本", content)
             self.assertIn("会话开始", content)
             self.assertIn("会话结束", content)
-            # 幂等重启
-            self.assertIsNone(logutil.start("test2") or None) if False else None
         finally:
             os.chdir(old)
             logutil._state["fh"] = None
@@ -224,23 +222,24 @@ class TestC2Prune(unittest.TestCase):
 
 
 class TestChain(unittest.TestCase):
-    """chain.py 离线部分：lwregshell 转义还原 / DN 推导（真实实弹值）。"""
+    """chain.py 离线部分：lwregshell 转义还原 / DN 推导（合成样例，覆盖
+    内嵌引号与反斜杠两种转义路径）。"""
 
     LINE_DN = ('"dcAccountDN"       REG_SZ          '
-               '"cn=10.0.0.99,ou=Domain Controllers,dc=corp,dc=local"')
+               '"cn=10.0.0.1,ou=Domain Controllers,dc=corp,dc=local"')
     # lwregshell 输出：内嵌引号转义为反斜杠+引号，反斜杠转义为双反斜杠
-    LINE_PW = '"dcAccountPassword" REG_SZ          "S4crubbed-P@ss"'
+    LINE_PW = '"dcAccountPassword" REG_SZ          "S1nthetic-\\\"P@ss\\\\w0rd"'
 
     def test_parse_lwreg_value(self):
         from vcstrike.chain import parse_lwreg_value
         self.assertEqual(parse_lwreg_value(self.LINE_DN),
-                         "cn=10.0.0.99,ou=Domain Controllers,"
-                         "dc=vsphere,dc=local")
-        self.assertEqual(parse_lwreg_value(self.LINE_PW), 'S4crubbed-P@ss')
-        # 真实目标输出带 `+  ` 前缀（实弹日志）
+                         "cn=10.0.0.1,ou=Domain Controllers,"
+                         "dc=corp,dc=local")
+        self.assertEqual(parse_lwreg_value(self.LINE_PW), 'S1nthetic-"P@ss\\w0rd')
+        # 真实输出形态带 `+  ` 前缀（lwregshell）
         self.assertEqual(parse_lwreg_value("+  " + self.LINE_DN),
-                         "cn=10.0.0.99,ou=Domain Controllers,"
-                         "dc=vsphere,dc=local")
+                         "cn=10.0.0.1,ou=Domain Controllers,"
+                         "dc=corp,dc=local")
         self.assertEqual(parse_lwreg_value('"k"  REG_SZ  "a\\\\b"'), "a\\b")
         self.assertIsNone(parse_lwreg_value("garbage line"))
 
@@ -248,12 +247,33 @@ class TestChain(unittest.TestCase):
         from vcstrike.chain import (extract_machine_creds, domain_from_dn,
                                     base_from_dn)
         dn, pw = extract_machine_creds(self.LINE_DN + "\n" + self.LINE_PW)
-        self.assertEqual(dn, "cn=10.0.0.99,ou=Domain Controllers,"
-                             "dc=vsphere,dc=local")
-        self.assertEqual(pw, 'S4crubbed-P@ss')
-        self.assertEqual(domain_from_dn(dn), "vsphere.local")
-        self.assertEqual(base_from_dn(dn), "dc=vsphere,dc=local")
+        self.assertEqual(dn, "cn=10.0.0.1,ou=Domain Controllers,"
+                             "dc=corp,dc=local")
+        self.assertEqual(pw, 'S1nthetic-"P@ss\\w0rd')
+        self.assertEqual(domain_from_dn(dn), "corp.local")
+        self.assertEqual(base_from_dn(dn), "dc=corp,dc=local")
         self.assertEqual(domain_from_dn("cn=x,dc=a,dc=b,c=cn"), "a.b")
+
+
+class TestMgmt(unittest.TestCase):
+    def test_report_markdown(self):
+        from vcstrike.chain import ChainResult
+        r = ChainResult(True, "card-body", [("S0 指纹", True, "ok"),
+                                            ("S1", False, "a|b")],
+                        upn="u@d", password="p", udn="cn=u,dn",
+                        via="59310", elapsed=75, host="10.0.0.1",
+                        identity="administrator@d")
+        md = r.report_markdown()
+        self.assertIn("# VC-Strike 全链路测试报告", md)
+        self.assertIn("| S0 指纹 | ✅ | ok |", md)
+        self.assertIn("a\\|b", md)          # 管道符转义
+        self.assertIn("1m15s", md)
+        self.assertIn("u@d", md)
+
+    def test_chainresult_fields(self):
+        from vcstrike.chain import ChainResult
+        r = ChainResult(True, "c", [], host="h", identity="i")
+        self.assertEqual((r.host, r.identity), ("h", "i"))
 
 
 class Test59310(unittest.TestCase):
