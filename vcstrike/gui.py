@@ -123,6 +123,9 @@ class ToolApp:
         self.root.after(120, self._poll_log)
         self.root.after(1000, self._poll_sessions)
         self.root.after(200, self._poll_term)
+        # 固定初始分割位：日志区随窗口按 ~24% 保底（weight 只在拖动/缩放时生效）
+        self.root.after(300, lambda: self.pw.sashpos(
+            0, max(300, int(self.root.winfo_height() * 0.76))))
         self.log("[i] 就绪。本工具仅用于授权渗透测试 / 漏洞验证。", "i")
         self.log("[i] 推荐流程：①指纹 → ②/③利用 → ⑤后渗透 → ⑥清理。", "m")
         self.log("[i] 全程运行日志: %s（测试完成后可直接把该文件回传做二次修复）"
@@ -189,8 +192,14 @@ class ToolApp:
                   style="Muted.TLabel").pack(side="right")
         ttk.Label(head, text="仅限授权测试 ·", style="Muted.TLabel").pack(side="right")
 
-        self.nb = ttk.Notebook(self.root)
-        self.nb.pack(fill="both", expand=True, padx=10, pady=(8, 0))
+        # 中部用垂直 PanedWindow：Notebook 与日志面板按 5:1 分配空间且可拖拽，
+        # 窗口变小时日志保底可见（此前 pack 顺序导致日志被挤到不可见）
+        self.pw = ttk.Panedwindow(self.root, orient="vertical")
+        self.pw.pack(fill="both", expand=True, padx=10, pady=(8, 8))
+        body = ttk.Frame(self.pw)
+        self.pw.add(body, weight=5)
+        self.nb = ttk.Notebook(body)
+        self.nb.pack(fill="both", expand=True)
         tabs = []
         for _ in range(8):
             tabs.append(ttk.Frame(self.nb))
@@ -214,8 +223,8 @@ class ToolApp:
         self._build_tab_detect()
         self._build_tab_chain()
 
-        logf = ttk.Frame(self.root)
-        logf.pack(fill="both", side="bottom", padx=10, pady=(6, 8))
+        logf = ttk.Frame(self.pw)
+        self.pw.add(logf, weight=1)
         bar = ttk.Frame(logf)
         bar.pack(fill="x")
         ttk.Label(bar, text="日志", style="Muted.TLabel").pack(side="left")
@@ -223,12 +232,13 @@ class ToolApp:
         ttk.Button(bar, text="打开日志目录", width=12,
                    command=self._open_logdir).pack(side="right", padx=4)
         ttk.Button(bar, text="保存", command=self._log_save, width=8).pack(side="right", padx=4)
-        self.log_txt = tk.Text(logf, height=8, bg=C["logbg"], fg=C["fg"],
+        self.log_txt = tk.Text(logf, height=6, bg=C["logbg"], fg=C["fg"],
                                insertbackground=C["fg"], relief="flat",
                                highlightthickness=1,
                                highlightbackground=C["border"],
                                highlightcolor=C["border"],
-                               font=(self.font_family, 9), state="disabled", wrap="none")
+                               font=(self.font_family, 9), state="disabled",
+                               wrap="none")
         self.log_txt.pack(fill="both", expand=True)
         for k, c in (("i", C["fg"]), ("m", C["muted"]), ("+", C["ok"]),
                      ("w", C["warn"]), ("!", C["err"]), ("d", "#5a9d5f")):
@@ -286,6 +296,14 @@ class ToolApp:
         ttk.Button(f, text="取当前目标", width=10,
                    command=lambda: tv.set(self.cur_target.get())).pack(side="left", padx=2)
         return f, tv
+
+    def _wrap_lbl(self, parent, text):
+        """随面板宽度自动换行的说明标签（小窗口下不再右缘截断）。"""
+        lbl = ttk.Label(parent, text=text, style="Muted.TLabel", justify="left")
+        lbl.pack(anchor="w", padx=6, pady=2, fill="x")
+        lbl.bind("<Configure>", lambda e, l=lbl: l.configure(
+            wraplength=max(160, e.width - 16)))
+        return lbl
 
     def _busy(self, text):
         self.root.after(0, self.status_var.set, "● " + text)
@@ -357,19 +375,18 @@ class ToolApp:
 
         top = ttk.Frame(f)
         top.grid(row=0, column=0, sticky="ew", pady=4)
-        ttk.Label(top, text="目标 (host 或 host:port):").pack(side="left")
+        ttk.Label(top, text="目标:").pack(side="left")
         self.tgt_input = tk.StringVar()
-        ttk.Entry(top, textvariable=self.tgt_input, width=28).pack(side="left", padx=6)
+        ttk.Entry(top, textvariable=self.tgt_input, width=20).pack(side="left", padx=4)
         ttk.Button(top, text="添加", command=self._tgt_add).pack(side="left")
-        ttk.Button(top, text="导入列表…", command=self._tgt_import).pack(side="left", padx=4)
-        ttk.Button(top, text="移除选中", command=self._tgt_del).pack(side="left")
-        ttk.Button(top, text="设为当前目标", command=self._tgt_setcur).pack(side="left", padx=4)
-        ttk.Entry(top, textvariable=self.http_proxy, width=18).pack(side="right")
-        ttk.Label(top, text="HTTP代理:", style="Muted.TLabel").pack(side="right",
-                                                                    padx=(10, 2))
-        ttk.Button(top, text="导出 CSV", command=self._scan_export).pack(side="right", padx=4)
+        ttk.Button(top, text="导入", command=self._tgt_import).pack(side="left", padx=2)
+        ttk.Button(top, text="删除", command=self._tgt_del).pack(side="left")
+        ttk.Button(top, text="设为当前", command=self._tgt_setcur).pack(side="left", padx=2)
         ttk.Button(top, text="批量指纹 [F5]", style="Acc.TButton",
-                   command=self._scan_all).pack(side="right")
+                   command=self._scan_all).pack(side="left", padx=6)
+        ttk.Button(top, text="导出 CSV", command=self._scan_export).pack(side="left")
+        ttk.Label(top, text="代理:", style="Muted.TLabel").pack(side="right", padx=(8, 2))
+        ttk.Entry(top, textvariable=self.http_proxy, width=14).pack(side="right")
 
         cols = ("host", "443", "5480", "514", "1514", "389", "636", "2020",
                 "api", "sasl", "nc", "conclusion")
@@ -535,9 +552,7 @@ class ToolApp:
         ttk.Button(bf, text="非破坏写入验证（写 /tmp 标记）[F2]",
                    style="Acc.TButton",
                    command=self._b310_check).pack(fill="x", pady=2, padx=4)
-        ttk.Label(bf, text="发送后需在目标上 ls 确认（UDP 无回包，写入验证即最强探测）。",
-                  style="Muted.TLabel", wraplength=int(500 * self.S),
-                  justify="left").pack(anchor="w", padx=6, pady=(0, 3))
+        self._wrap_lbl(bf, "发送后需在目标上 ls 确认（UDP 无回包，写入验证即最强探测）。")
         ttk.Button(bf, text="一键取证（RCE：系统信息 + 机器账户 + SSO 域名）",
                    command=self._b310_quick_forensics).pack(fill="x", pady=2, padx=4)
 
@@ -613,10 +628,8 @@ class ToolApp:
                    command=lambda: self.v510_wsname.set(rand_name())).pack(side="left")
         ttk.Button(jbar, text="植入 WebShell", style="Acc.TButton",
                    command=self._b310_webshell).pack(side="left", padx=8)
-        ttk.Label(jf, text="访问: https://<目标>/statsreport/<名称>.jsp?c=id"
-                          "（&d= 可选指定工作目录；如需认证，配合 ③ 页账户或已提取凭据）",
-                  style="Muted.TLabel", wraplength=int(520 * self.S),
-                  justify="left").pack(anchor="w", padx=6, pady=2)
+        self._wrap_lbl(jf, "访问: https://<目标>/statsreport/<名称>.jsp?c=id"
+                           "（&d= 可选指定工作目录；如需认证，配合 ③ 页账户或已提取凭据）")
 
     def _510_net(self):
         host = self.v59310_host.get().strip().split(":")[0]
@@ -908,12 +921,10 @@ class ToolApp:
 
         nf = ttk.LabelFrame(right, text="说明")
         nf.pack(fill="x", pady=4)
-        ttk.Label(nf, text="原理：libsrp 未校验 A ≡ 0 (mod N)。发送 A=N ⇒ S=0 ⇒ "
+        self._wrap_lbl(nf, "原理：libsrp 未校验 A ≡ 0 (mod N)。发送 A=N ⇒ S=0 ⇒ "
                            "K=SHA1(\"\") 已知，伪造 M1 通过 SASL bind，以任意“存在”"
                            "的身份读写 SSO 目录。若返回 “Illegal value for 'A' "
-                           "(A mod N == 0)” ⇒ 目标已修复。",
-                  style="Muted.TLabel", wraplength=int(540 * self.S),
-                  justify="left").pack(anchor="w", padx=6, pady=2)
+                           "(A mod N == 0)” ⇒ 目标已修复。")
 
         cf = ttk.LabelFrame(right, text="LDAP 查询控制台")
         cf.pack(fill="both", expand=True, pady=4)
@@ -1231,7 +1242,7 @@ class ToolApp:
         right.grid(row=0, rowspan=2, column=1, sticky="nsew")
 
         lf = ttk.LabelFrame(left, text="监听与会话（多会话 C2）")
-        lf.pack(fill="x", pady=4)
+        lf.pack(fill="both", expand=True, pady=4)
         lbar = ttk.Frame(lf)
         lbar.pack(fill="x", padx=4, pady=2)
         ttk.Label(lbar, text="端口:").pack(side="left")
@@ -1242,11 +1253,9 @@ class ToolApp:
         ttk.Button(lbar, text="探测存活", command=self._c2_probe).pack(side="left", padx=6)
         ttk.Button(lbar, text="关闭选中会话", style="Danger.TButton",
                    command=self._c2_close).pack(side="left")
-        ttk.Label(lf, text="流程：② 页植入反弹 → 本页启动监听 → 回连后双击会话行交互。"
+        self._wrap_lbl(lf, "流程：② 页植入反弹 → 本页启动监听 → 回连后双击会话行交互。"
                            "植入为一次性 cron（回连后自毁，不会每分钟重复回连）；"
-                           "断线后需重新植入。本工具不做隐蔽持久化。",
-                  style="Muted.TLabel", wraplength=int(520 * self.S),
-                  justify="left").pack(anchor="w", padx=6, pady=2)
+                           "断线后需重新植入。本工具不做隐蔽持久化。")
         wrapf = ttk.Frame(lf)
         wrapf.pack(fill="both", expand=True, padx=4, pady=2)
         self.sess_tree = ttk.Treeview(wrapf, columns=("addr", "created", "state"),
@@ -1267,7 +1276,7 @@ class ToolApp:
 
         rf = ttk.LabelFrame(right, text="交互终端（选中会话后直通）")
         rf.pack(fill="both", expand=True, pady=4)
-        self.term = tk.Text(rf, bg=COLORS["term"], fg=COLORS["termfg"],
+        self.term = tk.Text(rf, height=8, bg=COLORS["term"], fg=COLORS["termfg"],
                             insertbackground=COLORS["termfg"], relief="flat",
                             font=("Consolas", 10))
         self.term.insert("1.0", "[i] 选中会话后此处接管交互（原始 shell）。\n"
@@ -1289,13 +1298,13 @@ class ToolApp:
         fbar.pack(fill="x", padx=4, pady=2)
         ttk.Label(fbar, text="本地:").pack(side="left")
         self.up_local = tk.StringVar()
-        ttk.Entry(fbar, textvariable=self.up_local, width=22).pack(side="left", padx=2)
+        ttk.Entry(fbar, textvariable=self.up_local, width=16).pack(
+            side="left", fill="x", expand=True, padx=2)
         ttk.Label(fbar, text="远端:").pack(side="left")
         self.up_remote = tk.StringVar(value="/tmp/uploaded")
-        ttk.Entry(fbar, textvariable=self.up_remote, width=18).pack(side="left", padx=2)
-        ttk.Button(fbar, text="上传", command=self._c2_upload).pack(side="left")
-        ttk.Button(fbar, text="下载（远端→本地）", command=self._c2_download).pack(
-            side="left", padx=6)
+        ttk.Entry(fbar, textvariable=self.up_remote, width=14).pack(side="left", padx=2)
+        ttk.Button(fbar, text="上传", command=self._c2_upload).pack(side="left", padx=2)
+        ttk.Button(fbar, text="下载", command=self._c2_download).pack(side="left")
 
     def _c2_add_listener_ui(self):
         try:

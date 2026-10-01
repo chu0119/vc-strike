@@ -237,6 +237,10 @@ class TestChain(unittest.TestCase):
                          "cn=10.0.0.99,ou=Domain Controllers,"
                          "dc=vsphere,dc=local")
         self.assertEqual(parse_lwreg_value(self.LINE_PW), 'S4crubbed-P@ss')
+        # 真实目标输出带 `+  ` 前缀（实弹日志）
+        self.assertEqual(parse_lwreg_value("+  " + self.LINE_DN),
+                         "cn=10.0.0.99,ou=Domain Controllers,"
+                         "dc=vsphere,dc=local")
         self.assertEqual(parse_lwreg_value('"k"  REG_SZ  "a\\\\b"'), "a\\b")
         self.assertIsNone(parse_lwreg_value("garbage line"))
 

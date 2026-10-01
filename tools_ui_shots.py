@@ -49,11 +49,13 @@ def window_rect(root):
             rect.right - rect.left, rect.bottom - rect.top)
 
 
-def main(outdir):
+def main(outdir, size=None):
     os.makedirs(outdir, exist_ok=True)
     ensure_dpi_awareness()
     root = tk.Tk()
     app = ToolApp(root)          # 窗口尺寸由 ToolApp 按 DPI 自适应决定
+    if size:
+        root.geometry("%s+60+40" % size)
     root.update_idletasks()
     root.update()
 
@@ -116,4 +118,5 @@ def main(outdir):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "ui-review")
+    main(sys.argv[1] if len(sys.argv) > 1 else "ui-review",
+         sys.argv[2] if len(sys.argv) > 2 else None)
