@@ -1823,7 +1823,7 @@ class ToolApp:
         self.vv_pass = tk.StringVar()
         ttk.Entry(lf, textvariable=self.vv_pass, width=18, show="*").pack(
             side="left", padx=2)
-        ttk.Button(lf, text="登录并刷新 [F9]", style="Acc.TButton",
+        ttk.Button(lf, text="登录 [F9]", style="Acc.TButton",
                    command=self._vv_refresh).pack(side="left", padx=6)
 
         vf = ttk.LabelFrame(left, text="虚拟机清单（只读）")
