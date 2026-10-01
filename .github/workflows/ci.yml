@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile check
+        run: |
+          python -m py_compile vc-strike.py vcstrike/*.py tests/*.py
+      - name: Offline selftest (AES FIPS-197 / BER / SRP construction)
+        run: |
+          python -m vcstrike selftest
+      - name: Unit tests
+        run: |
+          python -m unittest discover -s tests -v
+      - name: CLI help smoke
+        run: |
+          python -m vcstrike --help
+          python -m vcstrike scan --help

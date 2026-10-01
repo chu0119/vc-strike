@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# 工具运行产物
+*.log
+*.csv
+output/
+results/
+
+# 本地安全工具缓存
+.mimosa/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store/
+Thumbs.db

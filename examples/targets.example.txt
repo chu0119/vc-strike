@@ -1,0 +1,5 @@
+# 示例：目标清单（scan 支持 @file 导入）
+# 一行一个，支持 host 或 host:port，# 开头为注释
+10.0.0.10
+10.0.0.11:514
+vcenter.lab.local
