@@ -158,6 +158,16 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name VC-Strike-
 python -c "import hashlib,glob;[print(hashlib.sha256(open(f,'rb').read()).hexdigest(), f) for f in glob.glob('dist/*')]"
 ```
 
+## 🧾 运行日志（测试后请回传）
+
+每次运行自动在 **exe/脚本同目录** 生成日志：`vc-strike-<gui|cli>-<时间戳>.log`
+
+- 内容：环境头（版本/系统/DPI 缩放）、全部操作记录与结果、异常完整堆栈、
+  C2 会话原始流（ANSI 已剥离）、结束标记
+- GUI 底部日志栏有 **"打开日志目录"** 按钮可直接定位
+- **测试结束后直接把日志文件发给维护者**，即可基于真实运行数据做
+  二次加固与修复（无需复述操作过程）
+
 ## 📖 文档
 
 - [使用手册（GUI/CLI/C2 全参数）](docs/使用手册.md)

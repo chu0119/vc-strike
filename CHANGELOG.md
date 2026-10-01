@@ -3,6 +3,15 @@
 本项目的显著变更记录。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.2.0] - 2026-10-01
+
+### Added
+- **全程运行日志**：每次运行自动在 exe/脚本同目录生成
+  `vc-strike-<gui|cli>-<时间戳>.log`，内容覆盖环境头（版本/系统/DPI/缩放）、
+  全部操作与结果、异常完整堆栈、C2 会话原始流（ANSI 已剥离）、结束标记。
+  GUI 日志栏新增"打开日志目录"按钮；CLI 全部 print 经 Tee 同步落盘。
+  用途：测试结束后直接把日志文件回传维护者，进行二次加固与修复。
+
 ## [1.1.2] - 2026-10-01
 
 ### Fixed

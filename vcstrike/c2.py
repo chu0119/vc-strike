@@ -29,6 +29,8 @@ import socket
 import threading
 import time
 
+from . import logutil
+
 # ANSI 转义序列：CSI（颜色/光标）、OSC（窗口标题等）、键盘模式/复位
 ANSI_RE = re.compile(
     r"\x1b\[[0-9;?]*[A-Za-z]"
@@ -81,6 +83,7 @@ class Session:
             with self._buf_lock:
                 self.buffer += text
                 self.last_seen = time.time()
+            logutil.raw("[会话#%d 输出] %s" % (self.id, text))
         self.alive = False
         self._log("[i] 会话 #%d 连接关闭" % self.id)
 

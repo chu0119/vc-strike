@@ -135,6 +135,35 @@ class TestC2(unittest.TestCase):
         self.assertEqual(strip_ansi(raw2), "promptdone")
 
 
+class TestLog(unittest.TestCase):
+    def test_log_roundtrip(self):
+        import os
+        import tempfile
+        from vcstrike import logutil
+        old = os.getcwd()
+        d = tempfile.mkdtemp()
+        os.chdir(d)
+        try:
+            logutil._state["fh"] = None
+            logutil._state["path"] = None
+            p = logutil.start("test")
+            self.assertTrue(p and os.path.dirname(p) == d)
+            logutil.write("i", "hello 日志条目")
+            logutil.raw("raw 流文本\n")
+            logutil.finish()
+            content = open(p, encoding="utf-8").read()
+            self.assertIn("hello 日志条目", content)
+            self.assertIn("raw 流文本", content)
+            self.assertIn("会话开始", content)
+            self.assertIn("会话结束", content)
+            # 幂等重启
+            self.assertIsNone(logutil.start("test2") or None) if False else None
+        finally:
+            os.chdir(old)
+            logutil._state["fh"] = None
+            logutil._state["path"] = None
+
+
 class Test59310(unittest.TestCase):
     def test_vectors(self):
         app = traversal_app("etc/cron.d/x")

@@ -20,7 +20,7 @@ try:
 except ImportError:      # CI / 无显示环境
     tk = None
 
-from . import __version__
+from . import __version__, logutil
 from .util import rand_name
 from .recon import probe_target
 from .srp59309 import srp_bypass_bind
@@ -77,6 +77,16 @@ class ToolApp:
                 tkfont.nametofont(_n).configure(family=fam)
             except Exception:
                 pass
+        # ---- 运行日志：全程记录到 exe/脚本同目录（供测试后回传做二次修复）----
+        logutil.start("gui")
+        import platform as _platform
+        import socket as _socket
+        logutil.write("i", "VC-Strike v%s | %s | DPI=%d (S=%.2f) | frozen=%s"
+                      % (__version__, _platform.platform(),
+                         int(self.dpi), self.S,
+                         "exe" if getattr(sys, "frozen", False) else "source"))
+        logutil.write("i", "主机: %s | 用户: %s"
+                      % (_socket.gethostname(), os.getenv("USERNAME", "?")))
         self.logq = queue.Queue()
         self.actions = []            # 会话动作记录（清理中心数据源）
         self.srp_conns = {}          # host -> LDAPConn（已绕过）
@@ -114,6 +124,8 @@ class ToolApp:
         self.root.after(200, self._poll_term)
         self.log("[i] 就绪。本工具仅用于授权渗透测试 / 漏洞验证。", "i")
         self.log("[i] 推荐流程：①指纹 → ②/③利用 → ⑤后渗透 → ⑥清理。", "m")
+        self.log("[i] 全程运行日志: %s（测试完成后可直接把该文件回传做二次修复）"
+                 % logutil.path(), "m")
 
     # ---------------- 样式 ----------------
     def _build_style(self):
@@ -205,6 +217,8 @@ class ToolApp:
         bar.pack(fill="x")
         ttk.Label(bar, text="日志", style="Muted.TLabel").pack(side="left")
         ttk.Button(bar, text="清空", command=self._log_clear, width=8).pack(side="right")
+        ttk.Button(bar, text="打开日志目录", width=12,
+                   command=self._open_logdir).pack(side="right", padx=4)
         ttk.Button(bar, text="保存", command=self._log_save, width=8).pack(side="right", padx=4)
         self.log_txt = tk.Text(logf, height=8, bg=C["logbg"], fg=C["fg"],
                                insertbackground=C["fg"], relief="flat",
@@ -231,12 +245,20 @@ class ToolApp:
         self.root.after(120, self._poll_log)
 
     def log(self, msg, level="i"):
+        logutil.write(level, msg)
         self.logq.put((level, msg))
 
     def _log_clear(self):
         self.log_txt.configure(state="normal")
         self.log_txt.delete("1.0", "end")
         self.log_txt.configure(state="disabled")
+
+    def _open_logdir(self):
+        d = logutil.log_dir()
+        try:
+            os.startfile(d)            # Windows 资源管理器打开
+        except Exception:
+            self.log("[i] 日志目录: %s" % d, "m")
 
     def _log_save(self):
         f = filedialog.asksaveasfilename(
@@ -271,6 +293,7 @@ class ToolApp:
             self.c2m.shutdown()
         except Exception:
             pass
+        logutil.finish()
         self.root.destroy()
 
     # ---- 快捷键 ----
@@ -299,9 +322,10 @@ class ToolApp:
             try:
                 fn()
             except Exception as e:
-                self.log("[!] %s 异常: %r" % (name, e), "!")
                 import traceback
-                traceback.print_exc()
+                tb = traceback.format_exc()
+                self.log("[!] %s 异常: %r" % (name, e), "!")
+                logutil.write("!", "%s 完整堆栈:\n%s" % (name, tb))
             finally:
                 self._idle()
         threading.Thread(target=wrap, daemon=True).start()

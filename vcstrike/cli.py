@@ -22,7 +22,7 @@ import ssl
 import sys
 import time
 
-from . import __version__
+from . import __version__, logutil
 from .util import rand_name
 from .recon import probe_target
 from .syslog59310 import (build_rfc5424, check_write, write_file, plant_cron,
@@ -410,15 +410,29 @@ def cmd_gui(_a):
 def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
-    # 无参数 → GUI
+    # 无参数 → GUI（GUI 启动器自行开启运行日志）
     if not argv:
         return cmd_gui(None)
     p = build_parser()
     a = p.parse_args(argv)
-    if a.cmd == "selftest":
-        return run_selftest()
     if a.cmd == "gui":
         return cmd_gui(a)
+    # CLI 模式：全程 print 输出与异常同步进日志文件（exe 同目录）
+    logutil.start("cli")
+    logutil.install_stdout_tee()
+    logutil.install_excepthook()
+    logutil.write("i", "argv: %s" % " ".join(argv))
+    try:
+        if a.cmd == "selftest":
+            rc = run_selftest()
+        else:
+            rc = _dispatch(a)
+    finally:
+        logutil.finish()
+    return rc
+
+
+def _dispatch(a):
     fn = {"scan": cmd_scan, "check59310": cmd_check59310,
           "write59310": cmd_write59310, "exec59310": cmd_exec59310,
           "webshell": cmd_webshell, "revshell": cmd_revshell,
