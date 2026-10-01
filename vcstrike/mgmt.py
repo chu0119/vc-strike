@@ -3,12 +3,15 @@
 通过 vCenter 官方 REST API（443, /rest/com/vmware/cis/session +
 /rest/vcenter/*）以交付的 SSO 管理员账户做**只读**清单采集：
 虚拟机 / 主机 / 数据存储 / 集群 / 网络。
-
-定位：授权测试报告的"影响范围"章节素材。只读，不修改任何资产，
-不做配置导出/凭据抽取，登出即结束会话。
+另提供 VM 导出（OVF/OVA，封装 VMware 官方 ovftool）——导出需要
+已交付的管理员凭据，属标准管理操作；仅单台，全程审计。
 """
 import base64
+import os
+import shutil
 import ssl
+import subprocess
+import urllib.parse
 import urllib.request
 import urllib.error
 
@@ -52,6 +55,7 @@ class VCenterRest:
 
     # ---- 会话 ----
     def login(self, user, password):
+        self._user, self._password = user, password
         b64 = base64.b64encode(("%s:%s" % (user, password)).encode()).decode()
         st, body = self._req("/rest/com/vmware/cis/session", method="POST",
                              headers={
@@ -114,6 +118,9 @@ class VCenterRest:
 
     def clusters(self):
         return self._list("/rest/vcenter/cluster", ("name",))
+
+    def datacenters(self):
+        return self._list("/rest/vcenter/datacenter", ("name",))
 
     def networks(self):
         return self._list("/rest/vcenter/network", ("name", "type"))
@@ -197,6 +204,90 @@ class VCenterRest:
             return True, "HTTP %d" % st
         return False, "HTTP %d: %s" % (st,
                                        body[:150].decode("utf-8", "replace"))
+
+    # ---- VM 导出（OVF/OVA，封装 VMware 官方 ovftool；仅单台，全程审计）----
+    def export_vm_ovftool(self, vm_name, dest_dir, ovftool=None,
+                          log=None, stop_flag=None):
+        """用本机 ovftool 把 vm_name 导出为 OVA 到 dest_dir。
+
+        返回 (ok, detail)。数据经管理网络（443）拉到本机，耗时与磁盘
+        大小成正比；stop_flag 置位可中止。"""
+        if not self.token:
+            raise MgmtError("未登录")
+        ovftool = ovftool or find_ovftool()
+        if not ovftool:
+            raise MgmtError(
+                "未找到 ovftool（VMware 官方 OVF 工具）。"
+                "请安装 VMware OVF Tool 并加入 PATH，或用 --ovftool 指定路径")
+        if not dest_dir:
+            raise MgmtError("需要导出目录")
+        dcs = [d for d, in self.datacenters()] or ["Datacenter"]
+        os.makedirs(dest_dir, exist_ok=True)
+        target = os.path.join(dest_dir, vm_name + ".ova")
+        last_err = None
+        for dc in dcs:                       # 多数据中心时逐个尝试（错误即快败）
+            if stop_flag is not None and stop_flag.is_set():
+                return False, "已取消"
+            url = ovftool_source_url(self.host, self._user, self._password,
+                                     dc, vm_name)
+            cmd = [ovftool, "--acceptAllEulas", "--noSSLVerify", url, target]
+            if log:
+                log("[*] ovftool: %s → %s（数据中心 %s）" % (vm_name, target, dc))
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, errors="replace")
+            except OSError as e:
+                raise MgmtError("ovftool 启动失败: %r" % e)
+            buf = ""
+            while True:
+                if stop_flag is not None and stop_flag.is_set():
+                    proc.kill()
+                    break
+                chunk = proc.stdout.read1(512)
+                if not chunk:
+                    break
+                buf += chunk
+                while "\n" in buf or "\r" in buf:
+                    i = min(x for x in (buf.find("\n"), buf.find("\r")) if x >= 0)
+                    line, buf = buf[:i], buf[i + 1:]
+                    if line.strip() and log:
+                        log("    " + line.strip())
+            rc = proc.wait()
+            if stop_flag is not None and stop_flag.is_set():
+                try:
+                    os.remove(target)
+                except OSError:
+                    pass
+                return False, "已取消"
+            if rc == 0 and os.path.isfile(target):
+                return True, "导出完成: %s（%.1f MB）" % (
+                    target, os.path.getsize(target) / 1048576)
+            last_err = "ovftool 退出码 %d（数据中心 %s）" % (rc, dc)
+        return False, last_err or "导出失败"
+
+
+def find_ovftool():
+    """定位本机 ovftool（VMware 官方 OVF 工具）。返回路径或 None。"""
+    p = shutil.which("ovftool")
+    if p:
+        return p
+    for c in (r"C:\Program Files\VMware\VMware OVF Tool\ovftool.exe",
+              r"C:\Program Files (x86)\VMware\VMware OVF Tool\ovftool.exe",
+              "/usr/bin/ovftool", "/usr/local/bin/ovftool"):
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def ovftool_source_url(host, user, password, datacenter, vm_name):
+    """组装 ovftool 的 vi:// 源地址（凭据 percent-encode）。"""
+    return "vi://%s:%s@%s/%s/vm/%s" % (
+        urllib.parse.quote(user, safe=""),
+        urllib.parse.quote(password, safe=""),
+        host, urllib.parse.quote(datacenter, safe=""),
+        urllib.parse.quote(vm_name, safe=""))
+
 
     # ---- 汇总 ----
     def summary(self, max_rows=12):

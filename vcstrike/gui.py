@@ -1761,6 +1761,33 @@ class ToolApp:
         self._wrap_lbl(of, "护栏：仅单台、需输入完整 VM-ID 确认、动作全程入日志"
                            "并登记 ⑥ 清理中心；不做批量操作。授权报告注明影响即可，"
                            "请在 RoE 允许范围内使用。")
+        ef = ttk.LabelFrame(right, text="导出 VM（OVF/OVA，单台，经本机 ovftool）")
+        ef.pack(fill="x", pady=4)
+        ebar = ttk.Frame(ef)
+        ebar.pack(fill="x", padx=4, pady=2)
+        ttk.Label(ebar, text="导出到:").pack(side="left")
+        self.vv_dest = tk.StringVar(value=os.getcwd())
+        ttk.Entry(ebar, textvariable=self.vv_dest, width=20).pack(
+            side="left", fill="x", expand=True, padx=2)
+        ttk.Button(ebar, text="浏览", width=6,
+                   command=lambda: self.vv_dest.set(
+                       filedialog.askdirectory() or self.vv_dest.get())).pack(
+            side="left")
+        ebar2 = ttk.Frame(ef)
+        ebar2.pack(fill="x", padx=4, pady=2)
+        ttk.Label(ebar2, text="VM 名称:", style="Muted.TLabel").pack(side="left")
+        self.vv_expname = tk.StringVar()
+        ttk.Entry(ebar2, textvariable=self.vv_expname, width=18).pack(
+            side="left", padx=4)
+        ttk.Button(ebar2, text="取选中 VM 名称",
+                   command=lambda: self._vv_fillname()).pack(side="left", padx=2)
+        ttk.Button(ebar2, text="开始导出（耗时与磁盘成正比）",
+                   style="Acc.TButton", command=self._vv_export).pack(
+            side="left", padx=6)
+        self._wrap_lbl(ef, "导出走 VMware 官方 ovftool（需本机已安装，自动检测）"
+                           "经 443 拉取到本机；仅单台，全程审计。大文件耗时与"
+                           "磁盘成正比，Esc 可中止。")
+
         xf = ttk.LabelFrame(right, text="输出")
         xf.pack(fill="both", expand=True, pady=4)
         self.vv_out = tk.Text(xf, height=10, bg=COLORS["logbg"], fg=COLORS["fg"],
@@ -1780,6 +1807,10 @@ class ToolApp:
         from .mgmt import VCenterRest, MgmtError
         if self._vv_conn is not None:
             return self._vv_conn
+        return self._vv_connect(host, user, password)
+
+    def _vv_connect(self, host, user, password):
+        from .mgmt import VCenterRest, MgmtError
         if not host or not user:
             raise MgmtError("需要目标与账户")
         c = VCenterRest(host, 443)
@@ -1940,6 +1971,64 @@ class ToolApp:
             except Exception as e:
                 self.log("[!] 电源操作失败: %s" % e, "!")
         self.run_bg(work, "电源操作")
+
+    def _vv_fillname(self):
+        sel = self._vv_sel()
+        if sel:
+            self.vv_expname.set(sel[1])
+
+    def _vv_export(self):
+        from .mgmt import MgmtError, find_ovftool
+        host, user, password = self._vv_creds()
+        vm_name = self.vv_expname.get().strip()
+        dest_dir = self.vv_dest.get().strip()
+        if not (host and vm_name and dest_dir):
+            messagebox.showwarning("提示", "需要目标、VM 名称与导出目录")
+            return
+        ovftool = find_ovftool()
+        if not ovftool:
+            messagebox.showwarning(
+                "未找到 ovftool",
+                "本机未安装 VMware OVF Tool。\n安装后重试，或手工导出：\n"
+                "https://<vcenter>/ui → VM → 操作 → 导出")
+            return
+        if not messagebox.askyesno(
+                "确认导出",
+                "将 %s 的 %s 导出为 OVA 到：\n%s\n\n"
+                "导出包含客户虚拟机整盘数据——请确认 RoE 允许且磁盘空间充足。\n"
+                "继续？" % (host, vm_name, dest_dir)):
+            return
+        self.stop_flag.clear()
+
+        def work():
+            try:
+                try:
+                    c = self._vv_client(host, user, password)
+                    ok, detail = c.export_vm_ovftool(
+                        vm_name, dest_dir, ovftool=ovftool,
+                        log=lambda s: self.log(s, "m"),
+                        stop_flag=self.stop_flag)
+                except MgmtError as e:
+                    s = str(e)
+                    if "401" in s or "认证失败" in s:
+                        self._vv_conn = None
+                        c = self._vv_connect(host, user, password)
+                        ok, detail = c.export_vm_ovftool(
+                            vm_name, dest_dir, ovftool=ovftool,
+                            log=lambda s: self.log(s, "m"),
+                            stop_flag=self.stop_flag)
+                    else:
+                        raise
+                self.root.after(0, lambda: self._vv_out_append(
+                    "[%s] 导出 %s：%s" % ("+" if ok else "!", vm_name, detail)))
+                self.log("[%s] 导出 %s：%s" % ("+" if ok else "!", vm_name, detail),
+                         "+" if ok else "!")
+                if ok:
+                    self.record("vops-导出", host, vm_name,
+                                "（OVA 在本机 %s，属交付物）" % dest_dir)
+            except Exception as e:
+                self.log("[!] 导出失败: %s" % e, "!")
+        self.run_bg(work, "导出")
 
     # ================= Tab6 清理中心 =================
     def _build_tab_clean(self):

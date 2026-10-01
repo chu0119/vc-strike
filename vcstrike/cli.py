@@ -163,10 +163,12 @@ def build_parser():
     s.add_argument("--pass", dest="password", required=True)
     s.add_argument("--port", type=int, default=443)
     s.add_argument("--action", required=True,
-                   choices=["vms", "detail", "disks", "snapshots", "power-on",
-                            "power-off", "suspend", "reset"],
-                   help="vms=清单；detail/disks/snapshots 需 --vm")
-    s.add_argument("--vm", default=None, help="VM 标识（vms 可列出）")
+                   choices=["vms", "detail", "disks", "snapshots", "export",
+                            "power-on", "power-off", "suspend", "reset"],
+                   help="vms=清单；detail/disks/snapshots/export 需 --vm")
+    s.add_argument("--vm", default=None, help="VM 名称（vms 可列出；export 用名称）")
+    s.add_argument("--out", default=None, help="export 的目标目录")
+    s.add_argument("--ovftool", default=None, help="ovftool 路径（默认自动检测）")
     return p
 
 
@@ -457,15 +459,18 @@ def cmd_vops(a):
             if a.action == "detail":
                 for k, v in c.vm_detail(a.vm).items():
                     print("%s: %s" % (k, v))
-            elif a.action == "disks":
-                for r in c.vm_disks(a.vm):
-                    print(" | ".join(r))
-            else:
-                snaps = c.vm_snapshots(a.vm)
-                if not snaps:
-                    print("快照：无")
-                for s in snaps:
-                    print(" | ".join(s))
+        elif a.action == "disks":
+            for r in c.vm_disks(a.vm):
+                print(" | ".join(r))
+        elif a.action == "export":
+            if not a.vm or not a.out:
+                print("[-] export 需要 --vm 与 --out（目标目录）")
+                return 2
+            ok, detail = c.export_vm_ovftool(
+                a.vm, a.out, ovftool=a.ovftool,
+                log=lambda s: print("    " + s))
+            print("[%s] %s" % ("+" if ok else "-", detail))
+            return 0 if ok else 1
         else:                                    # 电源操作
             if not a.vm:
                 print("[-] 需要 --vm")
