@@ -263,7 +263,8 @@ class VCenterRest:
 
     # ---- VM 导出（OVF/OVA，封装 VMware 官方 ovftool；仅单台，全程审计）----
     def export_vm_ovftool(self, vm_name, dest_dir, ovftool=None,
-                          log=None, stop_flag=None, auto_power=True):
+                          log=None, stop_flag=None, auto_power=True,
+                          power_confirm_cb=None):
         """用本机 ovftool 把 vm_name 导出为 OVA 到 dest_dir。
 
         auto_power=True 时：若 VM 处于开机状态（OVF 导出要求关机），
@@ -329,6 +330,13 @@ class VCenterRest:
             err = "\n".join(out_lines)
             # 开机状态不可导出 → 自动关机重试一次，完成后恢复开机
             if ("Powered on" in err or "InvalidState" in err) and auto_power:
+                if power_confirm_cb:
+                    if not power_confirm_cb(
+                            "VM「%s」处于开机状态，OVF 导出需要关机。\n"
+                            "是否自动关机并在导出完成后恢复开机？" % vm_name):
+                        if log:
+                            log("[!] 已取消自动关机，导出中止（VM 保持开机）")
+                        return False, "已取消（VM 开机，未导出）"
                 vm_id = self._find_vm_id(vm_name)
                 if vm_id:
                     if log:

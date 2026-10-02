@@ -3,6 +3,13 @@
 本项目的显著变更记录。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.6.4] - 2026-10-02
+
+### Fixed（实弹反馈，v1.7.0 回归）
+- **一键打通 NameError（auto_power 误注入）**：批量替换把 auto_power=True
+  误注入 5 处不相关调用——已全部摘除，auto_power 仅存于 export 路径。
+- **导出自动关机二次确认**：新增独立确认弹窗，取消则导出中止、VM 保持开机。
+
 ## [1.8.0] - 2026-10-02
 
 ### Fixed（实弹反馈）
