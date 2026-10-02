@@ -822,7 +822,7 @@ class ToolApp:
                                     vami_port=vport, proxy=proxy,
                                     use_b64=self.v510_b64.get(),
                                     poll_cb=lambda s: self.log(s, "m"),
-                                    stop_flag=self.stop_flag)
+                                    stop_flag=self.stop_flag, auto_power=True)
             if ok:
                 self.log("[+] 命令输出已取回（%d 字节）" % len(text), "+")
 
@@ -942,7 +942,7 @@ class ToolApp:
                 ok, text = rce_readback(host, port, cmd, tag, tcp=tcp, tls=tls,
                                         vami_port=vport, proxy=proxy,
                                         poll_cb=lambda s: self.log(s, "m"),
-                                        stop_flag=self.stop_flag)
+                                        stop_flag=self.stop_flag, auto_power=True)
                 if not ok:
                     self.log("[!] %s：%s" % (name, text), "!")
                     return
@@ -1722,7 +1722,7 @@ class ToolApp:
             ok, text = rce_readback(host, port, cmd, tag, tcp=tcp, tls=tls,
                                     vami_port=vport, proxy=proxy,
                                     poll_cb=lambda s: self.log(s, "m"),
-                                    stop_flag=self.stop_flag)
+                                    stop_flag=self.stop_flag, auto_power=True)
             if not ok:
                 self.log("[!] %s" % text, "!")
                 return
@@ -1864,7 +1864,7 @@ class ToolApp:
                           syslog_port=port, proto=self.v510_proto.get().lower(),
                           vami_port=vport, proxy=proxy, inventory=inv,
                           log=lambda s: self.log(s, "m"),
-                          stop_flag=self.stop_flag)
+                          stop_flag=self.stop_flag, auto_power=True)
             self.chain_result = r
             card = r.card
 
@@ -2237,6 +2237,7 @@ class ToolApp:
                 "确认导出",
                 "将 %s 的 %s 导出为 OVA 到：\n%s\n\n"
                 "导出包含客户虚拟机整盘数据——请确认 RoE 允许且磁盘空间充足。\n"
+                "若 VM 处于开机状态：将自动关机 → 导出 → 自动恢复开机。\n"
                 "继续？" % (host, vm_name, dest_dir)):
             return
         self.stop_flag.clear()
@@ -2248,7 +2249,7 @@ class ToolApp:
                     ok, detail = c.export_vm_ovftool(
                         vm_name, dest_dir, ovftool=ovftool,
                         log=lambda s: self.log(s, "m"),
-                        stop_flag=self.stop_flag)
+                        stop_flag=self.stop_flag, auto_power=True)
                 except MgmtError as e:
                     s = str(e)
                     if "401" in s or "认证失败" in s:
@@ -2257,7 +2258,7 @@ class ToolApp:
                         ok, detail = c.export_vm_ovftool(
                             vm_name, dest_dir, ovftool=ovftool,
                             log=lambda s: self.log(s, "m"),
-                            stop_flag=self.stop_flag)
+                            stop_flag=self.stop_flag, auto_power=True)
                     else:
                         raise
                 self.root.after(0, lambda: self._vv_out_append(
@@ -2517,7 +2518,7 @@ class ToolApp:
             ok, text = rce_readback(host, port, cmd, tag, tcp=tcp, tls=tls,
                                     vami_port=vport, proxy=proxy,
                                     poll_cb=lambda s: self.log(s, "m"),
-                                    stop_flag=self.stop_flag)
+                                    stop_flag=self.stop_flag, auto_power=True)
             if ok:
                 self.log("[+] 目标残留已清除，/etc/cron.d/ 现状:\n%s" % text, "+")
                 self.record("清理-目标残留", host, "rm -rf /etc/cron.d/cve59310* 等",

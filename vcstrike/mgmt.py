@@ -11,6 +11,7 @@ import os
 import shutil
 import ssl
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -253,9 +254,11 @@ class VCenterRest:
 
     # ---- VM 导出（OVF/OVA，封装 VMware 官方 ovftool；仅单台，全程审计）----
     def export_vm_ovftool(self, vm_name, dest_dir, ovftool=None,
-                          log=None, stop_flag=None):
+                          log=None, stop_flag=None, auto_power=True):
         """用本机 ovftool 把 vm_name 导出为 OVA 到 dest_dir。
 
+        auto_power=True 时：若 VM 处于开机状态（OVF 导出要求关机），
+        自动关机 → 等待关机完成 → 导出 → 恢复开机。
         返回 (ok, detail)。数据经管理网络（443）拉到本机，耗时与磁盘
         大小成正比；stop_flag 置位可中止。"""
         if not self.token:
@@ -285,6 +288,7 @@ class VCenterRest:
             except OSError as e:
                 raise MgmtError("ovftool 启动失败: %r" % e)
             buf = ""
+            out_lines = []
             while True:
                 if stop_flag is not None and stop_flag.is_set():
                     proc.kill()
@@ -299,8 +303,10 @@ class VCenterRest:
                 while "\n" in buf or "\r" in buf:
                     i = min(x for x in (buf.find("\n"), buf.find("\r")) if x >= 0)
                     line, buf = buf[:i], buf[i + 1:]
-                    if line.strip() and log:
-                        log("    " + line.strip())
+                    if line.strip():
+                        out_lines.append(line.strip())
+                        if log:
+                            log("    " + line.strip())
             rc = proc.wait()
             if stop_flag is not None and stop_flag.is_set():
                 try:
@@ -311,8 +317,70 @@ class VCenterRest:
             if rc == 0 and os.path.isfile(target):
                 return True, "导出完成: %s（%.1f MB）" % (
                     target, os.path.getsize(target) / 1048576)
-            last_err = "ovftool 退出码 %d（数据中心 %s）" % (rc, dc)
+            err = "\n".join(out_lines)
+            # 开机状态不可导出 → 自动关机重试一次，完成后恢复开机
+            if ("Powered on" in err or "InvalidState" in err) and auto_power:
+                vm_id = self._find_vm_id(vm_name)
+                if vm_id:
+                    if log:
+                        log("[*] VM 处于开机状态 → 自动关机后重试导出（完成后恢复开机）")
+                    if self._power_off_and_wait(vm_id, log=log,
+                                                stop_flag=stop_flag):
+                        try:
+                            r2 = self.export_vm_ovftool(
+                                vm_name, dest_dir, ovftool=ovftool, log=log,
+                                stop_flag=stop_flag, auto_power=False)
+                            if r2[0]:
+                                if log:
+                                    log("[*] 导出完成 → 恢复开机…")
+                                self.power_set(vm_id, "start")
+                            return r2
+                        finally:
+                            pass
+            last_err = "ovftool 退出码 %d（数据中心 %s）：%s" % (
+                rc, dc, err[-200:] if err else "无输出")
         return False, last_err or "导出失败"
+
+    def _find_vm_id(self, vm_name):
+        """按名称查找 VM-ID（精确匹配优先，其次唯一前缀匹配）。"""
+        try:
+            rows = self.vms()
+        except Exception:
+            return None
+        exact = [r for r in rows if r[0] == vm_name]
+        if exact:
+            return exact[0][4]
+        prefix = [r for r in rows if r[0].startswith(vm_name)]
+        return prefix[0][4] if len(prefix) == 1 else None
+
+    def _power_off_and_wait(self, vm_id, log=None, stop_flag=None,
+                            timeout=120):
+        """软关机并轮询至 POWERED_OFF（超时返回 False）。"""
+        try:
+            ok, detail = self.power_set(vm_id, "stop")
+            if not ok:
+                if log:
+                    log("[!] 关机指令失败: %s" % detail)
+                return False
+        except Exception as e:
+            if log:
+                log("[!] 关机指令异常: %r" % e)
+            return False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if stop_flag is not None and stop_flag.is_set():
+                return False
+            try:
+                if self.power_get(vm_id) == "POWERED_OFF":
+                    if log:
+                        log("[+] VM 已关机")
+                    return True
+            except Exception:
+                pass
+            time.sleep(3)
+        if log:
+            log("[!] 等待关机超时（%ds）" % timeout)
+        return False
 
 
 def find_ovftool():

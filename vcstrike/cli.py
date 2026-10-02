@@ -482,8 +482,15 @@ def cmd_vops(a):
             if not a.vm or not a.out:
                 print("[-] export 需要 --vm 与 --out（目标目录）")
                 return 2
+            if a.vm:
+                vmid = next((r[4] for r in c.vms() if r[0] == a.vm), None)
+                if vmid and c.power_get(vmid) == "POWERED_ON" \
+                        and not a.auto_power:
+                    print("[!] VM 处于开机状态——OVF 导出需要关机。")
+                    print("[i] 自动关机/恢复请加 --auto-power；或手工关机后重试。")
+                    return 2
             ok, detail = c.export_vm_ovftool(
-                a.vm, a.out, ovftool=a.ovftool,
+                a.vm, a.out, ovftool=a.ovftool, auto_power=a.auto_power,
                 log=lambda s: print("    " + s))
             print("[%s] %s" % ("+" if ok else "-", detail))
             return 0 if ok else 1
