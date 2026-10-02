@@ -38,3 +38,10 @@ def gen_user():
 def gen_password():
     """自动生成满足 SSO 复杂度的强密码。"""
     return rand_name(10) + "!Aa1" + rand_name(2)
+
+
+def stealth_user(prefix="vpxd-extension"):
+    """伪装成 vCenter 自带解决方案用户的账户名：
+    vpxd-extension-<8位hex>（vCenter 真实存在 vpxd-extension 解决方案用户，
+    追加随机后缀避免撞名，迷惑性更强）。"""
+    return "%s-%s" % (prefix, secrets.token_hex(4))

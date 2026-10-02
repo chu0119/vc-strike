@@ -1,0 +1,10 @@
+[
+ {
+  "host": "10.5.5.5",
+  "user": "vpxd-extension-a1b2c3d4@corp.local",
+  "password": "Pw123!",
+  "source": "test",
+  "note": "",
+  "created": "2026-10-02 20:14:22"
+ }
+]

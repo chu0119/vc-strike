@@ -3,13 +3,28 @@
 本项目的显著变更记录。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.7.0] - 2026-10-02
+
+### Added
+- **状态持久化**：目标清单/当前目标/端口/协议/代理/导出目录跨启动保存
+  （exe 同目录 vc-strike-ui.json，不含密码）。
+- **账号库**（vc-strike-accounts.json，持久化）：⑧/⑨ 双入口——
+  打通交付的账户自动入库；可固定一个账户多机共用；⑨ 一键带入并登录。
+- **伪装命名**：③/⑧ 默认账户名改为 vCenter 解决方案用户风格
+  （vpxd-extension-<8位hex>@<真实SSO域>），随机仅手动触发。
+- **⑨ 排序**：VM 清单表头点击排序（名称/电源/vCPU/内存/VM-ID，数字列按
+  数值，再点反向，带箭头指示）。
+- **⑨ 右键菜单**：复制 VM-ID/名称、详情/磁盘/快照、电源四操作（走同一
+  确认护栏）、导出此 VM。
+
 ## [1.6.2] - 2026-10-02
 
 ### Fixed（实弹反馈：VM 导出）
 - **导出在 ovftool 启动后立即失败**（"'_io.TextIOWrapper' object has no
   attribute 'read1'"）：Windows 下 subprocess 的 text=True 会把 stdout 包成
   TextIOWrapper（无 read1 方法）。改为二进制管道自行解码——Windows/Linux
-  行为一致，进度行（含  分隔）照常流式输出。已补 Windows 复现测试。
+  行为一致，进度行（含 
+ 分隔）照常流式输出。已补 Windows 复现测试。
 
 ## [1.6.1] - 2026-10-02
 

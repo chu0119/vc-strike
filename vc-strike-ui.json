@@ -1,0 +1,17 @@
+{
+ "targets": [
+  "10.5.5.5"
+ ],
+ "cur_target": "10.5.5.5",
+ "vv_dest": "C:\\Users\\chu01\\Documents",
+ "http_proxy": "",
+ "v510_port": "514",
+ "v510_proto": "UDP",
+ "v510_vport": "5480",
+ "v510_lhost": "",
+ "v510_lport": "4444",
+ "v590_port": "389",
+ "v590_ident": "administrator@vsphere.local",
+ "v590_cbase": "",
+ "saved_at": "2026-10-02 20:14:22"
+}
