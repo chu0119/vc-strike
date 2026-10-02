@@ -40,6 +40,18 @@ def gen_password():
     return rand_name(10) + "!Aa1" + rand_name(2)
 
 
+def human_size(n):
+    """字节 → 人类可读（B/KB/MB/GB/TB）；非数字原样返回。"""
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return str(n) if n else "?"
+    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if abs(n) < 1024 or unit == "PB":
+            return "%.1f %s" % (n, unit)
+        n /= 1024.0
+
+
 def stealth_user(prefix="vpxd-extension"):
     """伪装成 vCenter 自带解决方案用户的账户名：
     vpxd-extension-<8位hex>（vCenter 真实存在 vpxd-extension 解决方案用户，

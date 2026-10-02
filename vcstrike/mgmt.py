@@ -16,6 +16,8 @@ import urllib.parse
 import urllib.request
 import urllib.error
 
+from .util import human_size
+
 
 class MgmtError(Exception):
     pass
@@ -135,9 +137,11 @@ class VCenterRest:
         return self._list("/rest/vcenter/host", ("name", "connection_state"))
 
     def datastores(self):
-        return self._list("/rest/vcenter/datastore",
+        rows = self._list("/rest/vcenter/datastore",
                           ("name", "type", "status", "capacity",
-                           "free_space"))
+                           "free_space", "datastore"))
+        return [(n, t, st, human_size(cap), human_size(fr), ds)
+                for n, t, st, cap, fr, ds in rows]
 
     def clusters(self):
         return self._list("/rest/vcenter/cluster", ("name",))
@@ -183,7 +187,12 @@ class VCenterRest:
 
         兼容两种响应形态：7.x 的 {"snapshots": [...]} 与
         6.5/6.7 的裸列表。"""
-        val = self._get("/rest/vcenter/vm/%s/snapshot" % vm_id)
+        try:
+            val = self._get("/rest/vcenter/vm/%s/snapshot" % vm_id)
+        except MgmtError as e:
+            if "HTTP 404" in str(e):
+                return []          # 6.x：无快照的 VM 返回 404（视为无快照）
+            raise
         if isinstance(val, dict):
             snaps = val.get("snapshots", [])
         elif isinstance(val, list):

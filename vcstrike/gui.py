@@ -515,6 +515,7 @@ class ToolApp:
         sx.pack(side="bottom", fill="x")
         self.scan_tree.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
         self._tree_resizable(self.scan_tree)
+        self.scan_tree.bind("<Button-3>", self._scan_menu)
         self.scan_tree.bind("<Double-1>", lambda e: self._tgt_setcur())
         self.scan_results = {}
 
@@ -1022,6 +1023,7 @@ class ToolApp:
         sx.pack(side="bottom", fill="x")
         self.v590_tree.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
         self._tree_resizable(self.v590_tree)
+        self.v590_tree.bind("<Button-3>", self._v590_menu)
 
         af = ttk.LabelFrame(right, text="账户操作（授权测试）")
         af.pack(fill="x", pady=4)
@@ -1439,6 +1441,7 @@ class ToolApp:
         sb.pack(side="left", fill="y")
         self.sess_tree.configure(yscrollcommand=sb.set)
         self._tree_resizable(self.sess_tree)
+        self.sess_tree.bind("<Button-3>", self._sess_menu)
         self.sess_tree.bind("<Double-1>", lambda e: self._c2_use())
 
         rf = ttk.LabelFrame(right, text="交互终端（选中会话后直通）")
@@ -1668,6 +1671,7 @@ class ToolApp:
             self.cred_tree.column(c, width=w, anchor="w")
         self.cred_tree.pack(fill="x", padx=4, pady=(0, 4))
         self._tree_resizable(self.cred_tree)
+        self.cred_tree.bind("<Button-3>", self._cred_menu)
         ttk.Label(of, text="命令输出:", style="Muted.TLabel").pack(anchor="w", padx=6)
         self.postex_out = tk.Text(of, height=6, bg=COLORS["logbg"], fg=COLORS["fg"],
                                   relief="flat", font=(self.font_family, 9))
@@ -2029,6 +2033,21 @@ class ToolApp:
         self.vv_out.pack(fill="both", expand=True, padx=4, pady=4)
         self._vv_conn = None      # 已登录的 VCenterRest（登录后复用）
 
+    def _confirm_threadsafe(self, msg):
+        """后台线程弹出确认框：调度到主线程并阻塞等结果。"""
+        ev = threading.Event()
+        box = {"r": False}
+
+        def ask():
+            try:
+                box["r"] = messagebox.askyesno("需要关机", msg)
+            except Exception:
+                box["r"] = False
+            ev.set()
+        self.root.after(0, ask)
+        ev.wait(timeout=300)
+        return box["r"]
+
     def _vv_out_append(self, text):
         self.vv_out.insert("end", text if text.endswith("\n") else text + "\n")
         self.vv_out.see("end")
@@ -2249,7 +2268,8 @@ class ToolApp:
                     ok, detail = c.export_vm_ovftool(
                         vm_name, dest_dir, ovftool=ovftool,
                         log=lambda s: self.log(s, "m"),
-                        stop_flag=self.stop_flag, auto_power=True)
+                        stop_flag=self.stop_flag, auto_power=True,
+                        power_confirm_cb=self._confirm_threadsafe)
                 except MgmtError as e:
                     s = str(e)
                     if "401" in s or "认证失败" in s:
@@ -2258,7 +2278,8 @@ class ToolApp:
                         ok, detail = c.export_vm_ovftool(
                             vm_name, dest_dir, ovftool=ovftool,
                             log=lambda s: self.log(s, "m"),
-                            stop_flag=self.stop_flag, auto_power=True)
+                            stop_flag=self.stop_flag, auto_power=True,
+                            power_confirm_cb=self._confirm_threadsafe)
                     else:
                         raise
                 self.root.after(0, lambda: self._vv_out_append(
@@ -2271,6 +2292,133 @@ class ToolApp:
             except Exception as e:
                 self.log("[!] 导出失败: %s" % e, "!")
         self.run_bg(work, "导出")
+
+    # ---------- 右键菜单（通用） ----------
+    @staticmethod
+    def _copy_text(text, label="内容"):
+        import tkinter as _tk
+        root = _tk._default_root
+        root.clipboard_clear()
+        root.clipboard_append(text)
+        logutil.write("+", "[右键] 已复制%s: %s" % (label, text[:80]))
+
+    def _scan_menu(self, event):
+        row = self.scan_tree.identify_row(event.y)
+        if row:
+            self.scan_tree.selection_set(row)
+        sel = self.scan_tree.selection()
+        if not sel:
+            return
+        host = self.scan_tree.item(sel[0], "values")[0]
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="设为当前目标",
+                         command=self._tgt_setcur)
+        menu.add_command(label="指纹此目标（单台）",
+                         command=lambda: self._scan_one(host))
+        menu.add_separator()
+        menu.add_command(label="复制主机",
+                         command=lambda: self._copy_text(host, "主机"))
+        menu.add_command(label="移除此行", command=self._tgt_del)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _scan_one(self, host):
+        proxy = self.http_proxy.get().strip() or None
+
+        def work():
+            try:
+                r = probe_target(host, proxy=proxy, log=self.log)
+            except Exception as e:
+                self.log("[!] %s 指纹失败: %r" % (host, e), "!")
+                return
+            self.scan_results[host] = r
+            vals = (r["host"], "●" if r["443"] else "", "●" if r["5480"] else "",
+                    "●" if r["514tcp"] else "", "●" if r["1514"] else "",
+                    "●" if r["389"] else "", "●" if r["636"] else "",
+                    "●" if r["2020"] else "",
+                    r["api"] or "", r["mechs"] or "", r["nc"] or "", r["conclusion"])
+
+            def upd():
+                for iid in self.scan_tree.get_children():
+                    if self.scan_tree.item(iid, "values")[0] == host:
+                        self.scan_tree.item(iid, values=vals)
+                        break
+            self.root.after(0, upd)
+            self.log("[+] %s → %s" % (host, r["conclusion"]), "+")
+        self.run_bg(work, "单台指纹")
+
+    def _v590_menu(self, event):
+        row = self.v590_tree.identify_row(event.y)
+        if not row:
+            return
+        self.v590_tree.selection_set(row)
+        dn = self.v590_tree.item(row, "text")
+        attrs = self.v590_tree.set(row, "attrs")
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="复制 DN",
+                         command=lambda: self._copy_text(dn, "DN"))
+        menu.add_command(label="设为重置密码目标 DN",
+                         command=lambda: self.v590_rstuser.set(dn))
+        menu.add_command(label="删除该账户（ldapdelete）",
+                         command=lambda: (self.v590_delentry.set(dn),
+                                          self._b309_delete()))
+        menu.add_separator()
+        upn = ""
+        m2 = re.search(r"userPrincipalName=([^|]+)", attrs)
+        if m2:
+            upn = m2.group(1).strip()
+            menu.add_command(label="设为绕过身份（%s）" % upn[:40],
+                             command=lambda: self.v590_ident.set(upn))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _sess_menu(self, event):
+        row = self.sess_tree.identify_row(event.y)
+        if not row:
+            return
+        self.sess_tree.selection_set(row)
+        sid = int(row)
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="接管此会话",
+                         command=lambda: self._c2_use_id(sid))
+        menu.add_command(label="探测存活",
+                         command=lambda: self._c2_probe_id(sid))
+        menu.add_command(label="关闭此会话",
+                         command=lambda: self.c2m.close(sid))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _c2_use_id(self, sid):
+        s = self.c2m.get(sid)
+        if s:
+            self.cur_sess = s
+            self._term_append("== 已接管会话 #%d (%s) ==" % (s.id, s.addr))
+            self.log("[i] 当前交互会话 → #%d" % s.id, "m")
+
+    def _c2_probe_id(self, sid):
+        s = self.c2m.get(sid)
+        if s:
+            self.log("[*] 会话 #%d 探测中…" % s.id, "m")
+
+    def _cred_menu(self, event):
+        row = self.cred_tree.identify_row(event.y)
+        if not row:
+            return
+        key = self.cred_tree.set(row, "key")
+        val = self.cred_tree.set(row, "value")
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="复制凭据值",
+                         command=lambda: self._copy_text(val, "凭据"))
+        menu.add_command(label="复制来源+凭据",
+                         command=lambda: self._copy_text("%s = %s" % (key, val), "记录"))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _act_menu(self, event):
+        row = self.act_tree.identify_row(event.y)
+        if not row:
+            return
+        detail = self.act_tree.set(row, "detail")
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="复制详情",
+                         command=lambda: self._copy_text(detail, "详情"))
+        menu.tk_popup(event.x_root, event.y_root)
 
     # ---------- 账号库 ----------
     def _acc_refresh(self):
@@ -2467,6 +2615,7 @@ class ToolApp:
         _as = ttk.Scrollbar(awf, orient="vertical", command=self.act_tree.yview)
         self.act_tree.configure(yscrollcommand=_as.set)
         self._tree_resizable(self.act_tree)
+        self.act_tree.bind("<Button-3>", self._act_menu)
         for c, t, w in (("time", "时间", 100), ("type", "动作", 130),
                         ("target", "目标", 120), ("detail", "详情", 560)):
             self.act_tree.heading(c, text=t)

@@ -24,7 +24,7 @@ from .recon import probe_target
 from .srp59309 import srp_bypass_bind
 from .syslog59310 import rce_readback
 from .store import add_account
-from .util import gen_password, stealth_user
+from .util import gen_password, rand_name, stealth_user
 
 _LWREG_LINE = re.compile(r'"([^"]*)"\s+REG_SZ\s+"(.*)"')
 

@@ -491,6 +491,7 @@ def cmd_vops(a):
                     return 2
             ok, detail = c.export_vm_ovftool(
                 a.vm, a.out, ovftool=a.ovftool, auto_power=a.auto_power,
+                power_confirm_cb=None,
                 log=lambda s: print("    " + s))
             print("[%s] %s" % ("+" if ok else "-", detail))
             return 0 if ok else 1
