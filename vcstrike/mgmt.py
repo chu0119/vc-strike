@@ -281,8 +281,7 @@ class VCenterRest:
                 log("[*] ovftool: %s → %s（数据中心 %s）" % (vm_name, target, dc))
             try:
                 proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, errors="replace")
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             except OSError as e:
                 raise MgmtError("ovftool 启动失败: %r" % e)
             buf = ""
@@ -290,10 +289,13 @@ class VCenterRest:
                 if stop_flag is not None and stop_flag.is_set():
                     proc.kill()
                     break
+                # 二进制 BufferedReader 才有 read1；Windows text=True 下是
+                # TextIOWrapper（无 read1）—— 实弹踩雷点，保持二进制自行解码
                 chunk = proc.stdout.read1(512)
                 if not chunk:
                     break
-                buf += chunk
+                text = chunk.decode("utf-8", "replace")
+                buf += text
                 while "\n" in buf or "\r" in buf:
                     i = min(x for x in (buf.find("\n"), buf.find("\r")) if x >= 0)
                     line, buf = buf[:i], buf[i + 1:]

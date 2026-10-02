@@ -3,6 +3,14 @@
 本项目的显著变更记录。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.6.2] - 2026-10-02
+
+### Fixed（实弹反馈：VM 导出）
+- **导出在 ovftool 启动后立即失败**（"'_io.TextIOWrapper' object has no
+  attribute 'read1'"）：Windows 下 subprocess 的 text=True 会把 stdout 包成
+  TextIOWrapper（无 read1 方法）。改为二进制管道自行解码——Windows/Linux
+  行为一致，进度行（含  分隔）照常流式输出。已补 Windows 复现测试。
+
 ## [1.6.1] - 2026-10-02
 
 ### Fixed（实弹反馈）
