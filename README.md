@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="screenshots/gui-targets.png" alt="VC-Strike 主界面" width="88%">
-
 # ⚡ VC-Strike
 
 ### VMware vCenter 一体化授权渗透测试套件
@@ -27,6 +25,71 @@
 > [!WARNING]
 > **仅供已获书面授权的渗透测试 / 漏洞验证 / 防御研究使用。**
 > 未授权访问计算机系统属于刑事犯罪。使用者自行承担一切法律责任。
+
+---
+
+## 📋 概览
+
+### 这个工具能干什么
+
+| 能力 | 说明 |
+|---|---|
+| **无凭据 root RCE** | CVE-2026-59310：一个 UDP 包（无凭据）→ 60 秒后 root 命令执行 |
+| **无凭据目录接管** | CVE-2026-59309：一个 SASL bind（无凭据）→ 任意身份读写 SSO 目录 |
+| **一键打通** | 只填 IP → 自动关机 → 导出 → 交付可登录 /ui 的管理员账户 |
+| **vSphere 管理** | 用交付的账户做只读盘点（78 台 VM / 主机 / 存储 / 集群 / 网络）|
+| **C2 多会话** | 多端口监听 · 上传下载（md5 校验）· 交互终端 |
+| **全程审计** | 每一步自动登记清理中心 · 全程运行日志落盘 |
+
+### 影响版本
+
+| 分支 | 受影响范围 | 修复版本 |
+|---|---|---|
+| vCenter 9.1 | < 9.1.0.0300 | **9.1.0.0300** |
+| vCenter 9.0 | < 9.0.2.0100 | **9.0.2.0100**（Build 25629525）|
+| vCenter 8.0 U3 | < 8.0 U3k | **8.0 U3k** |
+| vCenter 8.0 U2 | < 8.0 U2f | **8.0 U2f** |
+| vCenter 8.0 初始/U1 | 全部 | 升级至 8.0 U3k+ |
+| vCenter 7.0 | — | 联系 Broadcom 获取补丁 |
+
+同时影响 VCF / vSphere Foundation / Telco Cloud 中内嵌的 vCenter 组件。
+
+**厂商通告**：[VMSA-2026-0006.1](https://support.broadcom.com/web/ecx/support-content-notification/-/external/content/SecurityAdvisories/0/38017)
+
+### 实测验证
+
+以下结果来自**真实 vCenter 6.x 环境**（Photon 1.0 内核）的授权渗透测试：
+
+| 测试项 | 结果 |
+|---|---|
+| 59310 写入验证（非破坏）| ✅ root 文件确认落盘 |
+| 59310 RCE（VAMI 回显）| ✅ `uid=0(root)` 命令执行确认 |
+| 59310 机器账户提取 | ✅ dcAccountDN + dcAccountPassword |
+| 59310 一键打通（自动关机→导出→恢复）| ✅ OVA 落盘 |
+| 59310 vSphere REST 盘点 | ✅ 78 台 VM 清单获取 |
+| 59309 SRP 机制确认 | ✅ rootDSE 通告 `GSSAPI SRP` |
+| 59309 挑战解析 | ✅ N=2048bit RFC5054 素数 |
+| 59309 完整绕过 | ⏳ 需 6.x 版本重测（v1.6.4 修复了解析问题）|
+
+### 补丁与修复
+
+| 项目 | 链接 |
+|---|---|
+| **VMSA-2026-0006.1**（厂商通告）| [Broadcom Advisory](https://support.broadcom.com/web/ecx/support-content-notification/-/external/content/SecurityAdvisories/0/38017) |
+| **GHSA-v2gp-49gj-2c9f**（CVE-2026-59310）| [GitHub Advisory](https://github.com/advisories/GHSA-v2gp-49gj-2c9f) |
+| **GHSA-fcv2-9hgc-5mgq**（CVE-2026-59309）| [GitHub Advisory](https://github.com/advisories/GHSA-fcv2-9hgc-5mgq) |
+| **vCenter 9.0.2.0100 发行说明** | [Broadcom Docs](https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-0/release-notes/patch-releases-9-0-0-x/vsphere/vcenter/vcenter-9-0-2-0100-release-notes.html) |
+| **rsyslog GHSA-xmp9-244p-5ggv** | [GitHub Advisory](https://github.com/rsyslog/rsyslog/security/advisories/GHSA-xmp9-244p-5ggv) |
+
+**临时缓解**（无法立即升级时）：
+
+1. 514/1514 仅对受管 ESXi 开放（防火墙 ACL）
+2. rsyslog 输入绑定 `pmrfc3164` 解析器（关闭 RFC5424 攻击面）
+3. omfile 启用 `securepath="normal"` + `secpath-drop="replace"`
+4. `$EscapeControlCharactersOnReceive on`
+5. 389/636/2020 限管理网可达
+
+> 📖 完整缓解措施与入侵痕迹排查见 [docs/检测与加固.md](docs/检测与加固.md)
 
 ---
 
