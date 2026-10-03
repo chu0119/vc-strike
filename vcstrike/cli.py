@@ -46,7 +46,9 @@ def _proto_args(sp):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="vc-strike",
-        description="VC-Strike — vCenter CVE-2026-59309/59310 授权渗透测试套件 v%s" % __version__,
+        description="VC-Strike — vCenter CVE-2026-59309/59310 授权渗透测试套件 v%s\n"
+                    "作者: chu0119 | 仓库: https://github.com/chu0119/vc-strike"
+                    % __version__,
         epilog="仅限已获书面授权的测试/研究使用。无参数运行启动 GUI。")
     p.add_argument("--version", action="version", version="vc-strike " + __version__)
     sub = p.add_subparsers(dest="cmd")

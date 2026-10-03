@@ -191,6 +191,11 @@ class ToolApp:
         head = ttk.Frame(self.root, padding=(14, 8))
         head.pack(fill="x")
         ttk.Label(head, text="VC-Strike", style="H1.TLabel").pack(side="left")
+        _gh = ttk.Label(head, text=" by chu0119 · GitHub", style="Muted.TLabel",
+                        cursor="hand2")
+        _gh.pack(side="left")
+        _gh.bind("<Button-1>", lambda e: _open_url(
+            "https://github.com/chu0119/vc-strike"))
         ttk.Label(head, text="  CVE-2026-59310 (syslog→root RCE) + "
                              "CVE-2026-59309 (SRP 认证绕过)",
                   style="Muted.TLabel").pack(side="left", padx=6)
@@ -2746,6 +2751,11 @@ def ensure_dpi_awareness():
             ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
         pass
+
+
+def _open_url(url):
+    import webbrowser
+    webbrowser.open(url)
 
 
 def run_gui():
